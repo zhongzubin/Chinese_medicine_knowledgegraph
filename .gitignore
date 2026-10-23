@@ -39,6 +39,8 @@ logs/
 *.log
 outputs/
 output/
+.cache/
+data/
 
 # ===== Streamlit 密钥 =====
 .streamlit/secrets.toml
