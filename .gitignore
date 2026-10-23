@@ -1,0 +1,54 @@
+# ===== 环境变量与密钥（务必忽略）=====
+.env
+.env.*
+!.env.example
+
+# ===== Python 虚拟环境与缓存 =====
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ===== 本地模型与向量数据（体积大、可重新生成）=====
+models/
+*.bin
+*.safetensors
+*.onnx
+*.gguf
+*.pt
+*.pth
+*.faiss
+*.index
+*.pkl
+
+# ===== 日志与运行时输出 =====
+logs/
+*.log
+outputs/
+output/
+
+# ===== Streamlit 密钥 =====
+.streamlit/secrets.toml
+
+# ===== IDE / 编辑器 =====
+.idea/
+.vscode/
+*.iml
+
+# ===== 操作系统文件 =====
+.DS_Store
+Thumbs.db
+desktop.ini
