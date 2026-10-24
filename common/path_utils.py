@@ -7,7 +7,7 @@ root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def get_file_path(relative_path):
-    return os.path.join(root_dir, relative_path)
+    return os.path.join(root_dir, relative_path)    # 返回文件的绝对路径
 
 
 if __name__ == '__main__':
