@@ -16,11 +16,16 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
+test-results/
+junit.xml
 build/
 dist/
 *.egg-info/
 .eggs/
+.uv-cache/
 
 # ===== 本地模型与向量数据（体积大、可重新生成）=====
 models/
@@ -41,6 +46,12 @@ outputs/
 output/
 .cache/
 data/
+*.tmp
+*.orig
+*.rej
+*.swp
+*.swo
+*~
 
 # ===== Streamlit 密钥 =====
 .streamlit/secrets.toml
