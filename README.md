@@ -233,6 +233,41 @@ uv run python -m graph_database.export_metadata --database neo4j
 
 导出器只执行只读查询，不会修改数据库，也不会把连接凭据写入元数据文件。
 
+### 5. 知识图谱问答
+
+问答命令只执行只读 Cypher，并返回答案、匹配实体、查询参数和图谱证据：
+
+```powershell
+uv run python -m graph_qa.cli --question "麻黄有什么功效？"
+```
+
+显示实际执行的 Cypher：
+
+```powershell
+uv run python -m graph_qa.cli --question "麻黄有什么功效？" --show-query
+```
+
+输出稳定的 JSON，便于程序调用：
+
+```powershell
+uv run python -m graph_qa.cli --question "四君子汤由哪些药材组成？" --format json
+```
+
+运行黄金问题集：
+
+```powershell
+uv run python -m graph_qa.evaluate
+```
+
+真实 Neo4j 和模型集成测试默认跳过，确认服务可用后显式启用：
+
+```powershell
+$env:GRAPH_QA_RUN_INTEGRATION = "1"
+uv run python -m pytest tests/test_graph_qa_integration.py -v
+```
+
+问答系统仅提供中医药知识参考，不能替代专业医疗诊断和治疗。Cypher 写操作、多语句、变量长度路径、过程调用和超出 Schema 的查询会被拒绝。
+
 ## 测试
 
 运行全部单元测试：
