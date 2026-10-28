@@ -126,6 +126,48 @@ def test_unknown_property_in_map_is_rejected():
         CypherGuard(make_schema()).validate(make_plan(query))
 
 
+def test_property_access_is_allowed_for_owning_label():
+    query = VALID_QUERY.replace(
+        "WHERE subject.name IN $entity_names",
+        "WHERE subject.name IN $entity_names\n  AND subject.alias IS NOT NULL",
+    )
+
+    validated = CypherGuard(make_schema()).validate(make_plan(query))
+
+    assert validated.limit == 20
+
+
+def test_property_access_is_rejected_for_other_label():
+    query = VALID_QUERY.replace(
+        "WHERE subject.name IN $entity_names",
+        "WHERE object.alias IN $entity_names",
+    )
+
+    with pytest.raises(CypherGuardError, match="Effect.*alias"):
+        CypherGuard(make_schema()).validate(make_plan(query))
+
+
+@pytest.mark.parametrize(
+    "map_expression",
+    [
+        "object {alias: 1}",
+        "object {.alias}",
+    ],
+)
+def test_map_property_is_rejected_for_other_label(map_expression):
+    query = VALID_QUERY.replace(
+        "RETURN subject.name AS subject,",
+        (
+            "WITH subject, relationship, object, "
+            f"{map_expression} AS properties\n"
+            "RETURN subject.name AS subject,"
+        ),
+    )
+
+    with pytest.raises(CypherGuardError, match="Effect.*alias"):
+        CypherGuard(make_schema()).validate(make_plan(query))
+
+
 def test_unknown_triple_direction_is_rejected():
     reversed_query = VALID_QUERY.replace(
         "MATCH (subject:Herb)-[relationship:HAS_EFFECT]->(object:Effect)",

@@ -25,7 +25,13 @@ DENIED_KEYWORDS = (
 )
 
 NODE_LABEL_RE = re.compile(
-    r"\(\s*(?:[A-Za-z_][A-Za-z0-9_]*\s*)?:\s*([A-Za-z_][A-Za-z0-9_]*)",
+    r"\(\s*(?:(?P<variable>[A-Za-z_][A-Za-z0-9_]*)\s*)?:\s*"
+    r"(?P<label>[A-Za-z_][A-Za-z0-9_]*)",
+    re.IGNORECASE,
+)
+NODE_PROPERTY_MAP_RE = re.compile(
+    r"\(\s*(?:(?P<variable>[A-Za-z_][A-Za-z0-9_]*)\s*)?:\s*"
+    r"(?P<label>[A-Za-z_][A-Za-z0-9_]*)\s*\{(?P<body>[^{}]*)\}",
     re.IGNORECASE,
 )
 RELATIONSHIP_TYPE_RE = re.compile(
@@ -44,9 +50,20 @@ TRIPLE_PATTERN_RE = re.compile(
     re.IGNORECASE,
 )
 PROPERTY_ACCESS_RE = re.compile(
-    r"\b[A-Za-z_][A-Za-z0-9_]*\.\s*([A-Za-z_][A-Za-z0-9_]*)\b"
+    r"\b(?P<variable>[A-Za-z_][A-Za-z0-9_]*)\s*\.\s*"
+    r"(?P<property>[A-Za-z_][A-Za-z0-9_]*)\b"
 )
-MAP_PROPERTY_RE = re.compile(r"\{[^{}]*?\b([A-Za-z_][A-Za-z0-9_]*)\s*:")
+PROPERTY_MAP_RE = re.compile(r"\{(?P<body>[^{}]*)\}")
+MAP_PROPERTY_RE = re.compile(
+    r"(?:^|,)\s*(?:"
+    r"(?P<property>[A-Za-z_][A-Za-z0-9_]*)\s*:"
+    r"|\.\s*(?P<shorthand>[A-Za-z_][A-Za-z0-9_]*)\b"
+    r")"
+)
+VARIABLE_BEFORE_MAP_RE = re.compile(
+    r"\b(?P<variable>[A-Za-z_][A-Za-z0-9_]*)\s*$",
+    re.IGNORECASE,
+)
 PARAMETER_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
 LIMIT_RE = re.compile(r"\bLIMIT\s+([0-9]+)\b", re.IGNORECASE)
 
@@ -119,15 +136,95 @@ def _mask_strings_and_reject_comments(query: str) -> str:
     return masked
 
 
+def _assert_property_allowed(
+    schema: GraphSchema,
+    label: str,
+    property_name: str,
+) -> None:
+    if property_name not in schema.labels[label]:
+        raise CypherGuardError(
+            ErrorCode.CYPHER_REJECTED,
+            f"标签 {label} 不允许属性: {property_name}",
+        )
+
+
+def _map_property_names(body: str) -> list[str]:
+    matches = list(MAP_PROPERTY_RE.finditer(body))
+    remaining = []
+    cursor = 0
+    for match in matches:
+        remaining.append(body[cursor : match.start()])
+        cursor = match.end()
+    remaining.append(body[cursor:])
+    if ":" in "".join(remaining):
+        raise CypherGuardError(
+            ErrorCode.CYPHER_REJECTED,
+            "属性 map 的键必须是明确的标识符",
+        )
+    return [
+        match.group("property") or match.group("shorthand")
+        for match in matches
+    ]
+
+
+def _validate_property_maps(
+    masked: str,
+    schema: GraphSchema,
+    variable_labels: dict[str, str],
+) -> None:
+    node_map_spans = []
+    for match in NODE_PROPERTY_MAP_RE.finditer(masked):
+        label = match.group("label")
+        for property_name in _map_property_names(match.group("body")):
+            _assert_property_allowed(schema, label, property_name)
+        node_map_spans.append(match.span())
+
+    for match in PROPERTY_MAP_RE.finditer(masked):
+        if any(
+            start <= match.start() and match.end() <= end
+            for start, end in node_map_spans
+        ):
+            continue
+
+        property_names = _map_property_names(match.group("body"))
+        if not property_names:
+            continue
+        variable_match = VARIABLE_BEFORE_MAP_RE.search(masked, 0, match.start())
+        if variable_match is None:
+            raise CypherGuardError(
+                ErrorCode.CYPHER_REJECTED,
+                "属性 map 无法绑定到图谱实体标签",
+            )
+        variable = variable_match.group("variable")
+        label = variable_labels.get(variable)
+        if label is None:
+            raise CypherGuardError(
+                ErrorCode.CYPHER_REJECTED,
+                f"属性 map 的变量未绑定图谱标签: {variable}",
+            )
+        for property_name in property_names:
+            _assert_property_allowed(schema, label, property_name)
+
+
 def _check_unknown_identifiers(masked: str, schema: GraphSchema) -> list[re.Match[str]]:
     labels: Set[str] = set()
+    variable_labels: dict[str, str] = {}
     for match in NODE_LABEL_RE.finditer(masked):
-        label = match.group(1)
+        label = match.group("label")
         try:
             schema.assert_label(label)
         except SchemaError as exc:
             raise CypherGuardError(ErrorCode.CYPHER_REJECTED, str(exc)) from exc
         labels.add(label)
+        variable = match.group("variable")
+        if variable:
+            existing_label = variable_labels.get(variable)
+            if existing_label is not None and existing_label != label:
+                raise CypherGuardError(
+                    ErrorCode.CYPHER_REJECTED,
+                    f"变量 {variable} 绑定了多个实体标签",
+                )
+            variable_labels[variable] = label
     if not labels:
         raise CypherGuardError(ErrorCode.CYPHER_REJECTED, "查询必须明确使用图谱实体标签")
 
@@ -159,19 +256,16 @@ def _check_unknown_identifiers(masked: str, schema: GraphSchema) -> list[re.Matc
             raise CypherGuardError(ErrorCode.CYPHER_REJECTED, str(exc)) from exc
 
     for match in PROPERTY_ACCESS_RE.finditer(masked):
-        property_name = match.group(1)
-        if property_name not in schema.property_keys and property_name != "name":
+        variable = match.group("variable")
+        property_name = match.group("property")
+        label = variable_labels.get(variable)
+        if label is None:
             raise CypherGuardError(
                 ErrorCode.CYPHER_REJECTED,
-                f"查询使用了元数据之外的属性: {property_name}",
+                f"属性访问的变量未绑定图谱标签: {variable}",
             )
-    for match in MAP_PROPERTY_RE.finditer(masked):
-        property_name = match.group(1)
-        if property_name not in schema.property_keys and property_name != "name":
-            raise CypherGuardError(
-                ErrorCode.CYPHER_REJECTED,
-                f"查询使用了元数据之外的属性: {property_name}",
-            )
+        _assert_property_allowed(schema, label, property_name)
+    _validate_property_maps(masked, schema, variable_labels)
     return patterns
 
 
