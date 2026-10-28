@@ -1,10 +1,10 @@
 # 知识图谱问答交接说明
 
-> 交接基线：`c09a6e1`（已推送到 `origin/main`）
+> 代码基线：`c99cb6d`
 >
 > 交接日期：2026-10-28
 >
-> 当前分支：`main`
+> 当前分支：`codex/graph-qa-retrieval-boundaries`
 
 本文用于新对话快速恢复上下文。开始开发前仍须完整阅读 `AGENTS.md`、`docs/graph_qa/README.md`、`architecture.md`、`contracts.md`、`security-and-evaluation.md` 和 `implementation-challenges.md`。
 
@@ -151,13 +151,15 @@ uv run streamlit run graph_qa/streamlit_app.py
 
 ## 9. 验证基线
 
-- 当前全量 pytest：`128 passed, 5 skipped`。
+- 当前全量 pytest：`138 passed, 5 skipped`。
 - 真实 Neo4j + 模型集成：通过。
 - Redis 限流、并发、会话集成：通过。
 - 真实跨实例 SSE 会话：通过。
-- 120 条黄金集完整工作流 outcome：`113/120`。
-- 纯召回 Recall@3：`98.89%`；完整工作流实体 Recall@3：`94.44%`。
-- 评测报告：[retrieval-evaluation-2026-10-28.md](retrieval-evaluation-2026-10-28.md)。
+- 120 条黄金集完整工作流 outcome：`116/120`。
+- 纯召回 Recall@3：`100%`；完整工作流实体 Recall@3：`96.67%`。
+- 未知实体误召回率：`13.33%`；semantic 路径 Recall@3：`85%`。
+- 修复前基线：[retrieval-evaluation-2026-10-28.md](retrieval-evaluation-2026-10-28.md)。
+- 本轮修复记录：[retrieval-boundary-fix-2026-10-28.md](retrieval-boundary-fix-2026-10-28.md)。
 - Streamlit 已回答、进度、证据、追问和清空会话的真实浏览器测试。
 - 浏览器截图：`output/playwright/graph-qa-streamlit.png`。
 
@@ -172,63 +174,58 @@ uv run python -m pytest tests/ -v
 
 ## 10. 已知限制
 
-- 120 条黄金集仍不足以代表开放用户表达；semantic 路径完整工作流 Recall@3 为 75%。
-- `0.56` 阈值在扩充集上暴露未知实体误召回，需后续单独校准。
-- 完整问题上的短实体子串和通用词可能先于目标实体命中。
-- 当前存在证据不关联目标实体但响应仍标记为 `grounded=true` 的风险。
+- 120 条黄金集仍不足以代表开放用户表达；semantic 路径完整工作流 Recall@3 为 85%。
+- `0.56` 阈值仍有 2 条低分 semantic 未知实体误召回，需后续单独校准。
+- 长未知词子串、通用词语义候选和无关证据 grounded 已完成首轮修复。
+- 属性级 Effect 候选仍可能被 Disease、Symptom 或通用部位词抢占。
 - 会话作用域是 API 客户端，不是最终登录用户。
 - 当前本地运行目标为单 worker；每个 worker 会重复加载约 1.3GB BGE 模型。
 - 没有可靠的 API 请求级硬取消，仍依赖模型和 Neo4j 组件超时。
 - 没有面向最终用户的多用户认证、监控和正式部署收尾。
 - 不实现内容生成第三路由。
 
-## 11. 当前发布与交接状态
+## 11. 当前实现与验证状态
 
-- 120 条评测代码与数据提交：`793f7d2`。
-- 评测报告与文档提交：`c09a6e1`。
-- 2026-10-28 已推送 `034f2fe..c09a6e1` 到 `origin/main`，当前工作区干净。
-- 可提交的评测入口为
-  [retrieval-evaluation-2026-10-28.md](retrieval-evaluation-2026-10-28.md)。
+- 初始 120 条评测提交：`793f7d2`、`c09a6e1`。
+- 边界与 grounded 修复提交：`c99cb6d`。
+- 全量 pytest：`138 passed, 5 skipped`。
+- 真实 120 条 outcome：`116/120`；grounded 证据覆盖率：100%。
 - 完整逐题 JSON 保存在本地
-  `output/graph_qa/evaluation-120-2026-10-28.json`；`output/` 被 Git 忽略，
-  不应依赖该文件恢复结论。
-- 本轮已结束，下一项业务代码任务尚未开始，也没有未提交的实验改动。
+  `output/graph_qa/evaluation-120-retrieval-boundaries-final-2026-10-28.json`；
+  `output/` 被 Git 忽略，不应依赖该文件恢复结论。
 
 ## 12. 下一步
 
-优先修复评测暴露的检索与证据边界，再继续扩功能：
+首轮边界修复已完成，下一轮优先处理剩余 semantic 精度：
 
-1. 修复完整问题上的短实体截获，避免“空青果”被“青果”直接命中。
-2. 从 semantic 查询中处理“药材、方剂、功效、治疗”等通用意图词。
-3. 收紧未知实体判定，并重新定义“证据必须关联目标实体”的 grounded 条件。
-4. 修复后重复 120 条评测，再评估阈值、实体描述和 reranker。
-5. 补充 5 轮追问评测，再进入 API 超时、监控和部署收尾。
+1. 针对 2 条低分 semantic 未知实体误召回建立调参/负样本集。
+2. 改进属性级 Effect 候选抽取，避免 Disease/Symptom 抢占。
+3. 明确 clarification 可接受措辞并更新评测规则。
+4. 补充 5 轮追问评测。
+5. 再进入 API 请求级超时、监控和部署收尾。
 
 ### 12.1 下一任务准备说明
 
-下一任务按高风险处理，因为会改变核心实体链接和 `grounded` 语义。开始编码前仍需向用户提交方案并等待明确确认。
+上一任务已按高风险流程完成。下一任务若继续调整 semantic 阈值或 reranker，仍需提交方案并确认。
 
 建议范围：
 
-- `graph_qa/entity_linker.py`：处理完整输入中的短实体截获和通用词候选。
-- `graph_qa/workflow.py`：检查预匹配与目标实体绑定，收紧证据是否支持本轮实体的判断。
-- `graph_qa/models.py` 与接口契约：仅在新状态无法用现有字段表达时修改；优先保持响应结构兼容。
-- `tests/test_entity_linker.py`、`tests/test_graph_qa_workflow.py` 和评测测试：增加对应回归。
-- `evaluation/qa_cases.jsonl`：仅在发现数据缺口时补充，维持 120 条现有基线可比性。
+- `graph_qa/entity_linker.py`：阈值、候选排序或 reranker。
+- `graph_qa/workflow.py`：仅在新的候选选择状态需要时修改。
+- `tests/test_entity_linker.py`、`tests/test_semantic_index.py`：增加阈值和负样本回归。
+- `evaluation/qa_cases.jsonl`：优先保持 120 条基线可比性，新增调参集应独立标注。
 
 验收重点：
 
-- “空青果”不得被“青果”直接链接。
-- “药材、方剂、功效、治疗”等通用意图词不得成为目标实体候选。
-- 证据与目标实体不相关时不得返回 `grounded=true`。
+- 不降低已修复的子串、通用词和 grounded 边界。
 - 原有 exact、alias、同名异标签、fuzzy 和 semantic 正常路径不回归。
 - 全量 pytest 通过；真实 120 条评测重跑并与本报告逐项比较。
 - 安全拦截率保持 100%，不新增内容生成或多 worker 能力。
 
 回滚方式：
 
-- 下一任务使用独立分支 `codex/graph-qa-retrieval-boundaries`。
-- 代码与评测数据按逻辑分开提交；出现不可接受的召回回归时回退到已验证基线 `c09a6e1`。
+- 当前修复基线为 `c99cb6d`；后续任务另建分支。
+- 出现不可接受回归时回退到 `c99cb6d` 或原稳定基线 `c09a6e1`。
 
 ## 13. 新对话建议开场
 
@@ -236,8 +233,8 @@ uv run python -m pytest tests/ -v
 继续开发 D:\code\github-clong\Chinese_medicine_knowledgegraph。
 先读取 AGENTS.md 和 docs/graph_qa/HANDOFF.md，再检查 git status。
 当前不实现内容生成，也不以多 worker 为运行目标。
-先读取 docs/graph_qa/retrieval-evaluation-2026-10-28.md。
-下一步优先修复完整问题上的短实体截获、通用词语义误召回和 grounded 证据边界，
-修复后重复运行 120 条黄金集。
+先读取 docs/graph_qa/retrieval-boundary-fix-2026-10-28.md。
+下一步优先处理剩余 semantic 误召回、Effect 候选抽取和 clarification 口径，
+修改后重复运行 120 条黄金集。
 开发前按 AGENTS.md 给出方案并等待确认。
 ```

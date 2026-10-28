@@ -187,7 +187,7 @@ LinkedEntity
 - label: str
 - name: str
 - matched_text: str
-- match_type: name | alias | fuzzy
+- match_type: name | alias | fuzzy | semantic
 - score: float
 ```
 
@@ -241,6 +241,10 @@ Evidence
 
 证据只能来自实际返回的图记录。答案生成节点不能自行创造证据。
 
+查询执行后和答案生成前都执行目标证据校验：证据至少要与一个
+`used_entities` 的 `(label, name)` 相同；与全部计划目标无关的证据必须丢弃。
+没有目标证据时返回 `NO_GRAPH_EVIDENCE`，不得标记为 `grounded=true`。
+
 ## 5. 大模型输出契约
 
 ### 5.1 意图分类
@@ -250,6 +254,7 @@ Evidence
 ### 5.2 实体抽取
 
 模型返回候选数组。候选不出现在图谱中时被链接器过滤；链接器不能因为候选来自模型就直接信任其标签。
+“药材、方剂、功效、治疗”等通用意图词不进入 exact、fuzzy 或 semantic 候选。
 
 ### 5.3 Cypher 生成
 

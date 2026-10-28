@@ -280,4 +280,7 @@ uv run python -m graph_qa.evaluate `
 - 2026-10-28 已推送 `034f2fe..c09a6e1` 到 `origin/main`。
 - 本报告提交后的交接状态、下一任务范围和验证要求见
   [HANDOFF.md](HANDOFF.md)。
+- 报告中短实体截获、通用词候选和 grounded 边界问题已由 `c99cb6d`
+  首轮修复，前后指标见
+  [retrieval-boundary-fix-2026-10-28.md](retrieval-boundary-fix-2026-10-28.md)。
 - 下一任务修改检索和 grounded 边界时，应以本报告为对照基线重新运行相同 120 条用例，不直接覆盖或重算本报告的历史指标。
