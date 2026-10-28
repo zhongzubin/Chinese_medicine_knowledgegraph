@@ -107,8 +107,10 @@ M1 实现中遇到的问题、修复过程和遗留限制记录在 [implementati
 
 ## 当前验证状态
 
-- 全量 pytest：132 passed。
-- 启用本地 BGE-large + FAISS 后黄金集：30/30。
+- 全量 pytest：128 passed、5 skipped。
+- 黄金集：120 条；完整工作流 outcome 通过 113/120。
+- 纯召回 Recall@3：98.89%；完整工作流实体 Recall@3：94.44%。
+- 详细口径和误例见 [2026-10-28 实体召回路径评测报告](retrieval-evaluation-2026-10-28.md)。
 - 11,043 实体完整 FAISS 首次构建约 10 分钟；缓存命中后启动约 7 秒。
 - Streamlit 已完成真实浏览器测试：回答、进度、证据、追问和清空会话均正常。
 

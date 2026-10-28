@@ -274,8 +274,12 @@ uv run python -m graph_qa.cli --question "四君子汤由哪些药材组成？" 
 运行黄金问题集：
 
 ```powershell
-uv run python -m graph_qa.evaluate
+uv run python -m graph_qa.evaluate `
+  --output output/graph_qa/evaluation-120-2026-10-28.json
 ```
+
+当前 120 条黄金集、指标口径和误例分析见
+[实体召回路径评测报告](docs/graph_qa/retrieval-evaluation-2026-10-28.md)。
 
 真实 Neo4j 和模型集成测试默认跳过，确认服务可用后显式启用：
 
@@ -399,11 +403,12 @@ uv run python -m pytest tests/ -v
 
 已完成：
 
-- M1 CLI 问答内核和 30 条黄金集。
+- M1 CLI 问答内核；黄金集已从 30 条扩充到 120 条。
 - 单 worker FastAPI、API Key、Redis 会话、SSE 和 Streamlit。
 - 本地 BGE-large、11,043 实体 FAISS 索引和持久化缓存。
 - 5 轮语义改写、同名异标签、只读 Cypher 和证据回答。
-- 全量测试 132 passed；启用真实 BGE+FAISS 后黄金集 30/30。
+- 全量测试 128 passed、5 skipped；真实 120 条评测 outcome 通过 113 条。
+- 纯召回 Recall@3 为 98.89%；完整工作流实体 Recall@3 为 94.44%。
 
 明确不做：
 
@@ -412,7 +417,7 @@ uv run python -m pytest tests/ -v
 
 下一步建议：
 
-1. 扩充黄金集，增加同义词、口语化描述、多轮追问和未知实体负样本，重点评估 FAISS 的 Recall@3 与误召回率。
-2. 对真实查询记录误匹配案例，继续校准 `0.56` 阈值和实体文本编码方式。
-3. 补齐 API 请求级超时、监控指标和部署说明。
-4. 在稳定评估基线后，再决定是否进入 LoRA 或其他模型增强。
+1. 修复完整问题上的短实体子串截获，以及“药材”“功效”等通用词进入语义候选的问题。
+2. 确保 `grounded=true` 时证据确实关联本轮目标实体。
+3. 在修复后重复评测，再校准 fuzzy/vector 阈值和评估 reranker。
+4. 补齐 API 请求级超时、监控指标和部署说明。

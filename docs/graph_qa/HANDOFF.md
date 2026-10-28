@@ -1,6 +1,6 @@
 # 知识图谱问答交接说明
 
-> 代码基线：`2d68e24`
+> 交接基线：`6c0b07c`（120 条评测工作区完成后更新）
 >
 > 交接日期：2026-10-28
 >
@@ -118,7 +118,7 @@ models/bge-large-zh-v1.5
 | `graph_qa/api.py` | FastAPI、鉴权、会话和 SSE 路由 |
 | `graph_qa/api_security.py` | 多 API Key 配置和校验 |
 | `graph_qa/streamlit_app.py` | Streamlit 双栏客户端 |
-| `evaluation/qa_cases.jsonl` | 30 条黄金问题 |
+| `evaluation/qa_cases.jsonl` | 120 条黄金问题 |
 
 ## 8. 必要配置
 
@@ -151,11 +151,13 @@ uv run streamlit run graph_qa/streamlit_app.py
 
 ## 9. 验证基线
 
-- 当前全量 pytest：`132 passed`。
+- 当前全量 pytest：`128 passed, 5 skipped`。
 - 真实 Neo4j + 模型集成：通过。
 - Redis 限流、并发、会话集成：通过。
 - 真实跨实例 SSE 会话：通过。
-- 启用真实本地 BGE-large + FAISS 后黄金集：`30/30`。
+- 120 条黄金集完整工作流 outcome：`113/120`。
+- 纯召回 Recall@3：`98.89%`；完整工作流实体 Recall@3：`94.44%`。
+- 评测报告：[retrieval-evaluation-2026-10-28.md](retrieval-evaluation-2026-10-28.md)。
 - Streamlit 已回答、进度、证据、追问和清空会话的真实浏览器测试。
 - 浏览器截图：`output/playwright/graph-qa-streamlit.png`。
 
@@ -170,8 +172,10 @@ uv run python -m pytest tests/ -v
 
 ## 10. 已知限制
 
-- 黄金集只有 30 条，不足以代表真实用户表达。
-- `0.56` 阈值只在当前小规模集合上校准，仍需语义误召回负样本。
+- 120 条黄金集仍不足以代表开放用户表达；semantic 路径完整工作流 Recall@3 为 75%。
+- `0.56` 阈值在扩充集上暴露未知实体误召回，需后续单独校准。
+- 完整问题上的短实体子串和通用词可能先于目标实体命中。
+- 当前存在证据不关联目标实体但响应仍标记为 `grounded=true` 的风险。
 - 会话作用域是 API 客户端，不是最终登录用户。
 - 当前本地运行目标为单 worker；每个 worker 会重复加载约 1.3GB BGE 模型。
 - 没有可靠的 API 请求级硬取消，仍依赖模型和 Neo4j 组件超时。
@@ -180,14 +184,13 @@ uv run python -m pytest tests/ -v
 
 ## 11. 下一步
 
-优先级最高的不是继续加功能，而是扩大评测和校准检索：
+优先修复评测暴露的检索与证据边界，再继续扩功能：
 
-1. 将黄金集从 30 条扩展到至少 100 条。
-2. 增加同义描述、错别字、口语输入、未知实体负样本和 5 轮追问。
-3. 为评测输出增加匹配路径统计：exact、fuzzy、semantic。
-4. 分别统计 Recall@3、未知实体误召回率、意图准确率、证据覆盖率和延迟。
-5. 根据真实误例校准 BGE 实体文本、阈值和是否需要 reranker。
-6. 评测稳定后，再补 API 请求级超时、监控和部署收尾。
+1. 修复完整问题上的短实体截获，避免“空青果”被“青果”直接命中。
+2. 从 semantic 查询中处理“药材、方剂、功效、治疗”等通用意图词。
+3. 收紧未知实体判定，并重新定义“证据必须关联目标实体”的 grounded 条件。
+4. 修复后重复 120 条评测，再评估阈值、实体描述和 reranker。
+5. 补充 5 轮追问评测，再进入 API 超时、监控和部署收尾。
 
 ## 12. 新对话建议开场
 
@@ -195,6 +198,8 @@ uv run python -m pytest tests/ -v
 继续开发 D:\code\github-clong\Chinese_medicine_knowledgegraph。
 先读取 AGENTS.md 和 docs/graph_qa/HANDOFF.md，再检查 git status。
 当前不实现内容生成，也不以多 worker 为运行目标。
-下一步先扩充黄金集到至少 100 条，并评估 exact/fuzzy/semantic 三类召回路径。
+先读取 docs/graph_qa/retrieval-evaluation-2026-10-28.md。
+下一步优先修复完整问题上的短实体截获、通用词语义误召回和 grounded 证据边界，
+修复后重复运行 120 条黄金集。
 开发前按 AGENTS.md 给出方案并等待确认。
 ```
