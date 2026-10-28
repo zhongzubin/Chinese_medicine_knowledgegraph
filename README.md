@@ -268,6 +268,58 @@ uv run python -m pytest tests/test_graph_qa_integration.py -v
 
 问答系统仅提供中医药知识参考，不能替代专业医疗诊断和治疗。Cypher 写操作、多语句、变量长度路径、过程调用和超出 Schema 的查询会被拒绝。
 
+### 6. 知识图谱问答 API
+
+API 支持 Uvicorn 多 worker 和多实例部署。API Key 校验无状态，限流与全局并发租约通过共享 Redis 协调。
+
+先启动本地 Redis：
+
+```powershell
+docker compose -f compose.redis.yml up -d
+```
+
+按 [.env.example](.env.example) 配置模型、Neo4j、API Key 和 Redis。API Key 至少 32 个字符，`GRAPH_QA_API_KEYS_JSON` 可以同时配置多个命名客户端，以支持独立限流和滚动轮换。
+
+启动单个 API 实例：
+
+```powershell
+uv run uvicorn graph_qa.api:app --host 127.0.0.1 --port 8000
+```
+
+启动多个 Uvicorn worker：
+
+```powershell
+uv run uvicorn graph_qa.api:app --host 127.0.0.1 --port 8000 --workers 4
+```
+
+检查服务：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/health
+```
+
+调用问答接口：
+
+```powershell
+$headers = @{ "X-API-Key" = "your_api_key" }
+$body = @{ question = "麻黄有什么功效？" } | ConvertTo-Json
+Invoke-RestMethod `
+  -Method Post `
+  -Uri http://127.0.0.1:8000/api/v1/qa `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body $body
+```
+
+限流默认按 `client_id` 共享为 10 次/60 秒，全局最大同时执行数为 4。Redis 不可用时接口失败关闭并返回 503，不会绕过限流。生产环境必须使用 HTTPS、Redis TLS/ACL 和独立的 Secret Manager；`GRAPH_QA_REDIS_URL` 不应包含在日志或 Git 中。
+
+Redis 共享状态集成测试默认跳过，确认测试 Redis 可用后显式启用：
+
+```powershell
+$env:GRAPH_QA_REDIS_TEST_URL = "redis://127.0.0.1:6379/0"
+uv run python -m pytest tests/test_graph_qa_redis_limits_integration.py -v
+```
+
 ## 测试
 
 运行全部单元测试：
