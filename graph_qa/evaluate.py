@@ -8,13 +8,14 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Protocol, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from graph_qa.cli import CLIConfigError, build_engine_from_environment
-from graph_qa.models import ErrorCode, GraphQAResponse
+from graph_qa.models import EntityCandidate, ErrorCode, GraphQAResponse, LinkedEntity
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CASES_PATH = PROJECT_ROOT / "evaluation" / "qa_cases.jsonl"
+MatchPath = Literal["exact", "fuzzy", "semantic"]
 
 
 class EvaluationModel(BaseModel):
@@ -39,6 +40,8 @@ class EvaluationCase(EvaluationModel):
     expected_intent: Optional[bool]
     expected_entities: List[ExpectedEntity] = Field(default_factory=list)
     expected_patterns: List[ExpectedPattern] = Field(default_factory=list)
+    expected_match_path: Optional[MatchPath] = None
+    retrieval_probe: Optional[str] = None
     expected_outcome: Literal[
         "grounded_answer",
         "direct_answer",
@@ -48,6 +51,28 @@ class EvaluationCase(EvaluationModel):
     ]
     notes: str = ""
 
+    @field_validator("retrieval_probe")
+    @classmethod
+    def strip_retrieval_probe(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("retrieval_probe 不能为空")
+        return value
+
+
+class EntityMatchRecord(EvaluationModel):
+    expected_label: str
+    expected_name: str
+    expected_path: Optional[MatchPath]
+    found_at_3: bool
+    label_rank: Optional[int]
+    actual_match_type: Optional[Literal["name", "alias", "fuzzy", "semantic"]]
+    actual_path: Optional[MatchPath]
+    path_matched: Optional[bool]
+    score: Optional[float]
+
 
 class EvaluationRecord(EvaluationModel):
     case_id: str
@@ -56,14 +81,43 @@ class EvaluationRecord(EvaluationModel):
     outcome_matched: bool
     intent_matched: Optional[bool]
     entity_recall_at_3: Optional[float]
+    entity_matches: List[EntityMatchRecord] = Field(default_factory=list)
     pattern_matched: Optional[bool]
+    unknown_entity_evaluated: bool
     error_code: Optional[str]
     elapsed_ms: int
     response: Dict[str, Any]
 
 
+class RetrievalRecord(EvaluationModel):
+    case_id: str
+    category: str
+    question: str
+    retrieval_probe: str
+    expected_entities: List[ExpectedEntity]
+    expected_path: Optional[MatchPath]
+    found_at_3: Optional[bool]
+    label_rank: Optional[int]
+    actual_match_type: Optional[Literal["name", "alias", "fuzzy", "semantic"]]
+    actual_path: Optional[MatchPath]
+    path_matched: Optional[bool]
+    false_recall: Optional[bool]
+    linked_entities: List[LinkedEntity] = Field(default_factory=list)
+
+
 class EvaluationEngine(Protocol):
     def answer(self, question: str) -> GraphQAResponse:
+        ...
+
+
+class RetrievalIndex(Protocol):
+    def match(
+        self,
+        candidates: Sequence[EntityCandidate],
+        question: str,
+        limit_per_label: int = 10,
+        fuzzy_threshold: float = 0.72,
+    ) -> List[LinkedEntity]:
         ...
 
 
@@ -99,18 +153,65 @@ def _outcome_matches(case: EvaluationCase, response: GraphQAResponse) -> bool:
     return False
 
 
-def _entity_recall_at_3(case: EvaluationCase, response: GraphQAResponse) -> Optional[float]:
+def _match_path(match_type: str) -> Optional[MatchPath]:
+    if match_type in {"name", "alias"}:
+        return "exact"
+    if match_type in {"fuzzy", "semantic"}:
+        return match_type
+    return None
+
+
+def _evaluate_expected_entities(
+    case: EvaluationCase,
+    linked_entities: Sequence[LinkedEntity],
+) -> tuple[List[EntityMatchRecord], Optional[float]]:
     if not case.expected_entities:
-        return None
-    linked = [(item.label, item.name) for item in response.linked_entities]
+        return [], None
+
+    first_by_key: Dict[tuple[str, str], tuple[LinkedEntity, int]] = {}
+    label_counts: Dict[str, int] = {}
+    for item in linked_entities:
+        rank = label_counts.get(item.label, 0) + 1
+        label_counts[item.label] = rank
+        first_by_key.setdefault((item.label, item.name), (item, rank))
+
+    results = []
     found = 0
     for expected in case.expected_entities:
-        label_candidates = [
-            name for label, name in linked if label == expected.label
-        ][:3]
-        if expected.name in label_candidates:
+        match = first_by_key.get((expected.label, expected.name))
+        actual_match_type = match[0].match_type if match else None
+        actual_path = _match_path(actual_match_type) if actual_match_type else None
+        label_rank = match[1] if match else None
+        found_at_3 = bool(label_rank is not None and label_rank <= 3)
+        if found_at_3:
             found += 1
-    return found / len(case.expected_entities)
+        path_matched = (
+            found_at_3 and actual_path == case.expected_match_path
+            if case.expected_match_path is not None
+            else None
+        )
+        results.append(
+            EntityMatchRecord(
+                expected_label=expected.label,
+                expected_name=expected.name,
+                expected_path=case.expected_match_path,
+                found_at_3=found_at_3,
+                label_rank=label_rank,
+                actual_match_type=actual_match_type,
+                actual_path=actual_path,
+                path_matched=path_matched,
+                score=match[0].score if match else None,
+            )
+        )
+    return results, found / len(case.expected_entities)
+
+
+def _entity_recall_at_3(
+    case: EvaluationCase,
+    response: GraphQAResponse,
+) -> Optional[float]:
+    _matches, recall = _evaluate_expected_entities(case, response.linked_entities)
+    return recall
 
 
 def _pattern_matched(case: EvaluationCase, response: GraphQAResponse) -> Optional[bool]:
@@ -140,6 +241,10 @@ def evaluate_cases(
             if case.expected_intent is not None and response.intent is not None
             else None
         )
+        entity_matches, entity_recall_at_3 = _evaluate_expected_entities(
+            case,
+            response.linked_entities,
+        )
         records.append(
             EvaluationRecord(
                 case_id=case.id,
@@ -147,11 +252,66 @@ def evaluate_cases(
                 question=case.question,
                 outcome_matched=_outcome_matches(case, response),
                 intent_matched=intent_matched,
-                entity_recall_at_3=_entity_recall_at_3(case, response),
+                entity_recall_at_3=entity_recall_at_3,
+                entity_matches=entity_matches,
                 pattern_matched=_pattern_matched(case, response),
+                unknown_entity_evaluated=(
+                    case.category == "missing_entity"
+                    and not case.expected_entities
+                ),
                 error_code=response.error.code.value if response.error else None,
                 elapsed_ms=elapsed_ms,
                 response=response.model_dump(mode="json"),
+            )
+        )
+    return records
+
+
+def evaluate_retrieval(
+    entity_index: RetrievalIndex,
+    cases: Sequence[EvaluationCase],
+    *,
+    limit_per_label: int = 10,
+) -> List[RetrievalRecord]:
+    """绕过意图和 Text2Cypher，单独评估实体召回路径。"""
+    records = []
+    for case in cases:
+        if not case.retrieval_probe:
+            continue
+        suggested_label = (
+            case.expected_entities[0].label
+            if len(case.expected_entities) == 1
+            else None
+        )
+        linked = entity_index.match(
+            [
+                EntityCandidate(
+                    text=case.retrieval_probe,
+                    suggested_label=suggested_label,
+                )
+            ],
+            case.question,
+            limit_per_label=limit_per_label,
+        )
+        matches, _recall = _evaluate_expected_entities(case, linked)
+        primary = matches[0] if matches else None
+        records.append(
+            RetrievalRecord(
+                case_id=case.id,
+                category=case.category,
+                question=case.question,
+                retrieval_probe=case.retrieval_probe,
+                expected_entities=case.expected_entities,
+                expected_path=case.expected_match_path,
+                found_at_3=primary.found_at_3 if primary else None,
+                label_rank=primary.label_rank if primary else None,
+                actual_match_type=primary.actual_match_type if primary else None,
+                actual_path=primary.actual_path if primary else None,
+                path_matched=primary.path_matched if primary else None,
+                false_recall=(
+                    bool(linked) if not case.expected_entities else None
+                ),
+                linked_entities=linked,
             )
         )
     return records
@@ -185,10 +345,21 @@ def summarize(records: Sequence[EvaluationRecord]) -> Dict[str, Any]:
     grounded_with_evidence = [
         record for record in grounded_records if record.response.get("evidence")
     ]
+    unknown_entity_records = [
+        record for record in records if record.unknown_entity_evaluated
+    ]
     latencies = [record.elapsed_ms for record in records]
 
     def ratio(numerator: int, denominator: int) -> Optional[float]:
         return round(numerator / denominator, 4) if denominator else None
+
+    path_stats, path_confusion, match_type_counts = _summarize_entity_matches(
+        [
+            match
+            for record in records
+            for match in record.entity_matches
+        ]
+    )
 
     return {
         "total": len(records),
@@ -223,6 +394,14 @@ def summarize(records: Sequence[EvaluationRecord]) -> Dict[str, Any]:
             len(grounded_with_evidence),
             len(grounded_records),
         ),
+        "workflow_paths": path_stats,
+        "workflow_path_confusion": path_confusion,
+        "workflow_match_type_counts": match_type_counts,
+        "unknown_entity_cases_evaluated": len(unknown_entity_records),
+        "unknown_entity_false_recall_rate": ratio(
+            sum(bool(record.response.get("linked_entities")) for record in unknown_entity_records),
+            len(unknown_entity_records),
+        ),
         "latency_p50_ms": _percentile(latencies, 0.50),
         "latency_p95_ms": _percentile(latencies, 0.95),
         "failures": [
@@ -235,6 +414,137 @@ def summarize(records: Sequence[EvaluationRecord]) -> Dict[str, Any]:
             for record in records
             if not record.outcome_matched
         ],
+    }
+
+
+def _summarize_entity_matches(
+    matches: Sequence[EntityMatchRecord],
+) -> tuple[Dict[str, Any], Dict[str, int], Dict[str, int]]:
+    paths = ("exact", "fuzzy", "semantic")
+    path_stats: Dict[str, Any] = {}
+    confusion: Dict[str, int] = {}
+    match_type_counts: Dict[str, int] = {}
+
+    for path in paths:
+        selected = [match for match in matches if match.expected_path == path]
+        path_stats[path] = {
+            "evaluated": len(selected),
+            "recall_at_3": (
+                round(sum(match.found_at_3 for match in selected) / len(selected), 4)
+                if selected
+                else None
+            ),
+            "path_match_rate": (
+                round(sum(bool(match.path_matched) for match in selected) / len(selected), 4)
+                if selected
+                else None
+            ),
+        }
+
+    for match in matches:
+        if match.expected_path is not None:
+            actual = match.actual_path or "unmatched"
+            key = f"{match.expected_path}->{actual}"
+            confusion[key] = confusion.get(key, 0) + 1
+        if match.actual_match_type is not None:
+            match_type_counts[match.actual_match_type] = (
+                match_type_counts.get(match.actual_match_type, 0) + 1
+            )
+    return path_stats, confusion, match_type_counts
+
+
+def summarize_retrieval(records: Sequence[RetrievalRecord]) -> Dict[str, Any]:
+    expected_records = [
+        record
+        for record in records
+        if record.expected_path is not None
+    ]
+    negative_records = [
+        record
+        for record in records
+        if record.false_recall is not None
+    ]
+    path_stats = {}
+    path_confusion: Dict[str, int] = {}
+    match_type_counts: Dict[str, int] = {}
+    for path in ("exact", "fuzzy", "semantic"):
+        selected = [
+            record for record in expected_records if record.expected_path == path
+        ]
+        path_stats[path] = {
+            "evaluated": len(selected),
+            "recall_at_3": (
+                round(sum(bool(record.found_at_3) for record in selected) / len(selected), 4)
+                if selected
+                else None
+            ),
+            "path_match_rate": (
+                round(sum(bool(record.path_matched) for record in selected) / len(selected), 4)
+                if selected
+                else None
+            ),
+        }
+    for record in expected_records:
+        actual_path = record.actual_path or "unmatched"
+        key = f"{record.expected_path}->{actual_path}"
+        path_confusion[key] = path_confusion.get(key, 0) + 1
+        if record.actual_match_type is not None:
+            match_type_counts[record.actual_match_type] = (
+                match_type_counts.get(record.actual_match_type, 0) + 1
+            )
+
+    def ratio(numerator: int, denominator: int) -> Optional[float]:
+        return round(numerator / denominator, 4) if denominator else None
+
+    return {
+        "total_probes": len(records),
+        "expected_cases_evaluated": len(expected_records),
+        "overall_recall_at_3": ratio(
+            sum(bool(record.found_at_3) for record in expected_records),
+            len(expected_records),
+        ),
+        "paths": path_stats,
+        "path_confusion": path_confusion,
+        "match_type_counts": match_type_counts,
+        "negative_cases_evaluated": len(negative_records),
+        "unknown_entity_false_recall_rate": ratio(
+            sum(bool(record.false_recall) for record in negative_records),
+            len(negative_records),
+        ),
+        "failures": [
+            {
+                "case_id": record.case_id,
+                "expected_path": record.expected_path,
+                "actual_path": record.actual_path,
+                "linked_entities": [
+                    item.model_dump(mode="json")
+                    for item in record.linked_entities
+                ],
+            }
+            for record in records
+            if (
+                (record.expected_path is not None and not record.path_matched)
+                or record.false_recall
+            )
+        ],
+    }
+
+
+def _evaluation_context(engine: EvaluationEngine) -> Dict[str, Any]:
+    entity_index = getattr(engine, "entity_index", None)
+    schema = getattr(engine, "schema", None)
+    reasoner = getattr(engine, "reasoner", None)
+    model = getattr(reasoner, "llm", None)
+    semantic_index = getattr(entity_index, "semantic_index", None)
+    encoder = getattr(semantic_index, "encoder", None)
+    return {
+        "metadata_format_version": getattr(schema, "format_version", None),
+        "entity_count": len(entity_index) if entity_index is not None else None,
+        "answer_model": getattr(model, "model_name", getattr(model, "model", None)),
+        "vector_enabled": semantic_index is not None,
+        "embedding_model": getattr(encoder, "model_name", None),
+        "vector_top_k": getattr(semantic_index, "top_k", None),
+        "vector_threshold": getattr(semantic_index, "threshold", None),
     }
 
 
@@ -266,15 +576,26 @@ def main() -> int:
 
     try:
         records = evaluate_cases(engine, cases)
+        entity_index = getattr(engine, "entity_index", None)
+        retrieval_records = (
+            evaluate_retrieval(entity_index, cases)
+            if entity_index is not None
+            else []
+        )
     finally:
         repository = getattr(engine, "repository", None)
         if repository is not None and hasattr(repository, "close"):
             repository.close()
 
     summary = summarize(records)
+    summary["evaluation_context"] = _evaluation_context(engine)
+    summary["retrieval"] = summarize_retrieval(retrieval_records)
     payload = {
         "summary": summary,
         "records": [record.model_dump(mode="json") for record in records],
+        "retrieval_records": [
+            record.model_dump(mode="json") for record in retrieval_records
+        ],
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if args.output:
