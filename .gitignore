@@ -53,6 +53,9 @@ data/
 *.swo
 *~
 
+# ===== 本地实现说明（不提交） =====
+docs/graph_qa/知识图谱问答内核实现说明.md
+
 # ===== Streamlit 密钥 =====
 .streamlit/secrets.toml
 
