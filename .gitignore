@@ -13,6 +13,7 @@ __pycache__/
 *.so
 .ipynb_checkpoints/
 .pytest_cache/
+.playwright-cli/
 .mypy_cache/
 .ruff_cache/
 .coverage
