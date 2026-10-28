@@ -124,6 +124,35 @@ def _evidence_fallback_answer(evidence: Sequence[Evidence]) -> str:
     return "\n".join(lines)
 
 
+def _evidence_entity_keys(evidence: Evidence) -> Set[Tuple[str, str]]:
+    return {
+        (evidence.subject_label, evidence.subject),
+        (evidence.object_label, evidence.object),
+    }
+
+
+def _relevant_evidence(
+    evidence: Sequence[Evidence],
+    used_entities: Sequence[Any],
+) -> List[Evidence]:
+    used_keys = {(item.label, item.name) for item in used_entities}
+    if not used_keys:
+        return []
+    return [
+        item
+        for item in evidence
+        if bool(_evidence_entity_keys(item) & used_keys)
+    ]
+
+
+def evidence_matches_used_entities(
+    evidence: Sequence[Evidence],
+    used_entities: Sequence[Any],
+) -> bool:
+    """至少一条可验证证据必须关联本轮查询目标。"""
+    return bool(_relevant_evidence(evidence, used_entities))
+
+
 def _parameter_strings(value: Any) -> List[str]:
     if isinstance(value, str):
         return [value]
@@ -547,18 +576,20 @@ class GraphQAEngine:
             )
 
         evidence = evidence_from_rows(result.rows, self.schema)
+        target_evidence = _relevant_evidence(evidence, plan.used_entities)
         update: Dict[str, Any] = {
             "query_result": result,
-            "evidence": evidence,
+            "evidence": target_evidence,
             "stage_events": ["execute_cypher"],
         }
-        if result.rows and not evidence:
+        if result.rows and not target_evidence:
             update.update(
                 {
                     "error_code": ErrorCode.NO_GRAPH_EVIDENCE.value,
-                    "error_message": "查询返回了数据，但没有可验证的证据字段",
+                    "error_message": "查询结果没有关联目标实体的可验证证据",
                     "answer": NO_EVIDENCE_ANSWER,
                     "grounded": False,
+                    "evidence": [],
                 }
             )
         return update
@@ -566,11 +597,17 @@ class GraphQAEngine:
     def _answer_from_graph(self, state: AgentState) -> Dict[str, Any]:
         evidence = state.get("evidence", [])
         query_result = state.get("query_result")
-        if not evidence or query_result is None:
+        plan = state.get("cypher_plan")
+        if (
+            not evidence
+            or query_result is None
+            or plan is None
+            or not evidence_matches_used_entities(evidence, plan.used_entities)
+        ):
             return self._terminal_error(
                 state,
                 ErrorCode.NO_GRAPH_EVIDENCE,
-                "没有可验证的图谱证据",
+                "没有关联目标实体的可验证图谱证据",
                 NO_EVIDENCE_ANSWER,
                 "answer_from_graph",
             )
@@ -720,8 +757,7 @@ class GraphQAEngine:
         return "finish" if state.get("error_code") else "rewrite_question"
 
     def _prelink_entities(self, state: AgentState) -> Dict[str, Any]:
-        linked = self.entity_index.match(
-            [],
+        linked = self.entity_index.match_exact(
             _active_question(state),
             limit_per_label=self.entity_limit,
         )

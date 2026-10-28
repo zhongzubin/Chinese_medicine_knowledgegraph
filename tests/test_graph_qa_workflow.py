@@ -18,7 +18,7 @@ from graph_qa.models import (
     UsedEntityRef,
 )
 from graph_qa.schema import GraphSchema
-from graph_qa.workflow import GraphQAEngine
+from graph_qa.workflow import GraphQAEngine, evidence_matches_used_entities
 
 VALID_QUERY = """
 MATCH (subject:Herb)-[relationship:HAS_EFFECT]->(object:Effect)
@@ -73,11 +73,27 @@ def make_index() -> EntityIndex:
     )
 
 
-def make_plan(cypher: str = VALID_QUERY) -> CypherPlan:
+def make_index_with_guizhi() -> EntityIndex:
+    return EntityIndex.from_records(
+        [
+            EntityRecord("Herb", "桂枝"),
+            EntityRecord("Effect", "发汗"),
+        ]
+    )
+
+
+def make_entity_index_with_effect_name() -> EntityIndex:
+    return EntityIndex.from_records([EntityRecord("Effect", "功效")])
+
+
+def make_plan(
+    cypher: str = VALID_QUERY,
+    entity_name: str = "麻黄",
+) -> CypherPlan:
     return CypherPlan(
         cypher=cypher,
-        parameters={"entity_names": ["麻黄"]},
-        used_entities=[UsedEntityRef(label="Herb", name="麻黄")],
+        parameters={"entity_names": [entity_name]},
+        used_entities=[UsedEntityRef(label="Herb", name=entity_name)],
         expected_result_shape="herb_effect_pairs",
     )
 
@@ -364,6 +380,50 @@ def test_known_graph_entity_overrides_incorrect_model_intent():
     assert response.error is None
 
 
+def test_prelink_uses_exact_matches_only():
+    class FailingSemanticMatcher:
+        def match(self, text):
+            raise AssertionError(f"预匹配不应调用语义召回: {text}")
+
+    entity_index = EntityIndex.from_records(
+        [EntityRecord("Herb", "麻黄")],
+        semantic_index=FailingSemanticMatcher(),
+    )
+    engine = GraphQAEngine(
+        reasoner=FakeReasoner(intent=tcm_intent()),
+        repository=FakeRepository(),
+        schema=make_schema(),
+        entity_index=entity_index,
+    )
+
+    update = engine._prelink_entities({"normalized_question": "近似药材有什么作用？"})
+
+    assert update["prelinked_entities"] == []
+
+
+def test_generic_model_candidate_requests_clarification_without_query():
+    reasoner = FakeReasoner(
+        intent=tcm_intent(),
+        candidates=[EntityCandidate(text="功效", suggested_label="Effect")],
+    )
+    repository = FakeRepository()
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_entity_index_with_effect_name(),
+    )
+
+    response = engine.answer("九幽草有什么功效？")
+
+    assert response.grounded is False
+    assert response.error is None
+    assert response.linked_entities == []
+    assert "请补充" in response.answer
+    assert reasoner.plan_calls == 0
+    assert repository.execute_calls == 0
+
+
 def test_tcm_question_without_linked_entity_requests_clarification():
     reasoner = FakeReasoner(
         intent=tcm_intent(),
@@ -493,6 +553,66 @@ def test_empty_query_result_is_reported_without_fabricating_answer():
 
     assert response.grounded is False
     assert response.evidence == []
+    assert "没有找到" in response.answer
+    assert reasoner.answer_calls == 0
+
+
+def test_evidence_must_match_a_used_entity():
+    refs = [
+        UsedEntityRef(label="Disease", name="感冒"),
+        UsedEntityRef(label="Formula", name="银翘散"),
+    ]
+    evidence = [
+        Evidence(
+            subject="银翘散",
+            subject_label="Formula",
+            relationship="HAS_EFFECT",
+            object="清热解毒",
+            object_label="Effect",
+        ),
+        Evidence(
+            subject="银翘散",
+            subject_label="Formula",
+            relationship="TREATS_DISEASE",
+            object="感冒",
+            object_label="Disease",
+        ),
+    ]
+
+    assert evidence_matches_used_entities(evidence, refs) is True
+    assert evidence_matches_used_entities(evidence[:1], refs) is True
+    assert evidence_matches_used_entities(
+        [
+            Evidence(
+                subject="麻黄",
+                subject_label="Herb",
+                relationship="HAS_EFFECT",
+                object="发汗",
+                object_label="Effect",
+            )
+        ],
+        refs,
+    ) is False
+
+
+def test_unrelated_evidence_does_not_mark_answer_grounded():
+    reasoner = FakeReasoner(
+        intent=tcm_intent(),
+        plans=[make_plan(entity_name="桂枝")],
+    )
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=FakeRepository(rows=ROWS),
+        schema=make_schema(),
+        entity_index=make_index_with_guizhi(),
+    )
+
+    response = engine.answer("桂枝有什么功效？")
+
+    assert response.grounded is False
+    assert response.evidence == []
+    assert response.error is not None
+    assert response.error.code == ErrorCode.NO_GRAPH_EVIDENCE
     assert "没有找到" in response.answer
     assert reasoner.answer_calls == 0
 

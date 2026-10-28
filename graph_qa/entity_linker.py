@@ -20,6 +20,150 @@ from graph_qa.models import EntityCandidate, LinkedEntity
 
 NORMALIZE_RE = re.compile(r"[\W_]+", re.UNICODE)
 ALIAS_SPLIT_RE = re.compile(r"[，,、；;/\n]+")
+GENERIC_ENTITY_TERMS = frozenset(
+    {
+        "中药",
+        "中草药",
+        "药材",
+        "方剂",
+        "处方",
+        "药品",
+        "药物",
+        "功效",
+        "作用",
+        "治疗",
+        "缓解",
+        "症状",
+        "疾病",
+        "文献",
+        "出处",
+        "来源",
+        "成分",
+        "组成",
+        "用法",
+        "用量",
+        "禁忌",
+        "注意事项",
+        "资料",
+        "信息",
+        "知识",
+        "图谱",
+        "数据库",
+    }
+)
+DIRECT_LEFT_BOUNDARY_MARKERS = (
+    "请问",
+    "查询",
+    "查找",
+    "关于",
+    "针对",
+    "治疗",
+    "缓解",
+    "用于",
+    "服用",
+    "含有",
+    "使用",
+    "选择",
+    "了解",
+    "想知道",
+    "对于",
+    "帮助",
+    "用",
+    "含",
+    "有",
+    "和",
+    "与",
+    "及",
+    "或",
+    "把",
+    "对",
+    "给",
+    "让",
+    "在",
+    "从",
+    "由",
+    "是",
+    "的",
+    "问",
+    "查",
+    "找",
+    "知",
+    "治",
+    "缓",
+)
+DIRECT_RIGHT_BOUNDARY_MARKERS = (
+    "有什么",
+    "有哪些",
+    "是什么",
+    "怎么样",
+    "怎么办",
+    "可以",
+    "能否",
+    "是否",
+    "用于",
+    "用来",
+    "出自",
+    "来自",
+    "组成",
+    "治疗",
+    "缓解",
+    "帮助",
+    "属于",
+    "包括",
+    "有",
+    "是",
+    "可",
+    "能",
+    "会",
+    "应",
+    "该",
+    "的",
+    "和",
+    "与",
+    "及",
+    "或",
+    "由",
+    "含",
+    "出",
+    "来",
+    "治",
+    "缓",
+    "用",
+    "吗",
+    "呢",
+    "哪",
+    "什",
+    "怎",
+    "如",
+)
+FUZZY_SUFFIX_CHARACTERS = frozenset(
+    {
+        "草",
+        "参",
+        "花",
+        "叶",
+        "根",
+        "藤",
+        "果",
+        "子",
+        "仁",
+        "皮",
+        "枝",
+        "木",
+        "石",
+        "虫",
+        "丹",
+        "丸",
+        "散",
+        "膏",
+        "汤",
+        "饮",
+        "片",
+        "露",
+        "酒",
+        "茶",
+    }
+)
 
 
 def normalize_entity_text(value: str) -> str:
@@ -32,6 +176,45 @@ def split_aliases(value: Optional[str]) -> List[str]:
     if not value:
         return []
     return [part.strip() for part in ALIAS_SPLIT_RE.split(value) if part.strip()]
+
+
+def _has_direct_question_boundary(text: str, start: int, end: int) -> bool:
+    """要求实体词位于问题边界，避免长未知词中的短实体被直接命中。"""
+    left_ok = start == 0 or any(
+        text[:start].endswith(marker)
+        for marker in DIRECT_LEFT_BOUNDARY_MARKERS
+    )
+    right_ok = end == len(text) or any(
+        text[end:].startswith(marker)
+        for marker in DIRECT_RIGHT_BOUNDARY_MARKERS
+    )
+    return left_ok and right_ok
+
+
+def _semantic_question_text(question: str) -> str:
+    normalized = normalize_entity_text(question)
+    for term in sorted(GENERIC_ENTITY_TERMS, key=len, reverse=True):
+        normalized = normalized.replace(term, "")
+    return normalized
+
+
+def _is_plausible_fuzzy_variant(candidate: str, term: str) -> bool:
+    """拒绝在未知名称中间插入字符后形成的伪模糊命中。"""
+    if candidate == term:
+        return True
+    if len(candidate) == len(term):
+        return True
+    shorter, longer = sorted((candidate, term), key=len)
+    matcher = SequenceMatcher(None, shorter, longer, autojunk=False)
+    matched_length = sum(block.size for block in matcher.get_matching_blocks())
+    if matched_length != len(shorter):
+        return True
+    if len(longer) - len(shorter) != 1:
+        return False
+    return (
+        longer.startswith(shorter)
+        and longer[-1] in FUZZY_SUFFIX_CHARACTERS
+    )
 
 
 @dataclass(frozen=True)
@@ -132,9 +315,21 @@ class EntityIndex:
         for entry in self._allowed_entries(suggested_label):
             for term, match_type in entry.terms():
                 normalized_term = normalize_entity_text(term)
-                if len(normalized_term) < 2:
+                if (
+                    len(normalized_term) < 2
+                    or normalized_term in GENERIC_ENTITY_TERMS
+                ):
                     continue
-                if normalized_term in normalized_question:
+                start = normalized_question.find(normalized_term)
+                while start >= 0:
+                    end = start + len(normalized_term)
+                    if not _has_direct_question_boundary(
+                        normalized_question,
+                        start,
+                        end,
+                    ):
+                        start = normalized_question.find(normalized_term, start + 1)
+                        continue
                     results.append(
                         (
                             LinkedEntity(
@@ -147,6 +342,7 @@ class EntityIndex:
                             normalized_term,
                         )
                     )
+                    break
         longest_matches = []
         for item, normalized_term in results:
             if any(
@@ -175,7 +371,13 @@ class EntityIndex:
                 if len(normalized_term) < 2:
                     continue
                 score = SequenceMatcher(None, normalized_candidate, normalized_term).ratio()
-                if score > best_score:
+                if (
+                    score > best_score
+                    and _is_plausible_fuzzy_variant(
+                        normalized_candidate,
+                        normalized_term,
+                    )
+                ):
                     best_score = score
             if best_score >= fuzzy_threshold:
                 results.append(
@@ -202,8 +404,15 @@ class EntityIndex:
 
         normalized_question = normalize_entity_text(question)
         results: List[LinkedEntity] = []
+        linkable_candidates = [
+            candidate
+            for candidate in candidates
+            if normalize_entity_text(candidate.text) not in GENERIC_ENTITY_TERMS
+        ]
+        if candidates and not linkable_candidates:
+            return []
 
-        for candidate in candidates:
+        for candidate in linkable_candidates:
             result_count_before_candidate = len(results)
             exact_matches = self._exact_matches(candidate.text)
             if candidate.suggested_label:
@@ -224,8 +433,31 @@ class EntityIndex:
         if not results:
             results.extend(self._direct_question_matches(normalized_question, None))
         if not results and self.semantic_index is not None:
-            results.extend(self.semantic_index.match(question))
+            semantic_question = _semantic_question_text(question)
+            if semantic_question:
+                results.extend(self.semantic_index.match(semantic_question))
 
+        return self._finalize(results, limit_per_label)
+
+    def match_exact(
+        self,
+        question: str,
+        limit_per_label: int = 10,
+    ) -> List[LinkedEntity]:
+        """只执行问题中的名称和别名精确匹配，供模型调用前预匹配使用。"""
+        if limit_per_label < 1:
+            raise ValueError("limit_per_label 必须大于等于 1")
+        results = self._direct_question_matches(
+            normalize_entity_text(question),
+            None,
+        )
+        return self._finalize(results, limit_per_label)
+
+    @staticmethod
+    def _finalize(
+        results: Sequence[LinkedEntity],
+        limit_per_label: int,
+    ) -> List[LinkedEntity]:
         best_by_key: Dict[Tuple[str, str], LinkedEntity] = {}
         for result in results:
             key = (result.label, result.name)

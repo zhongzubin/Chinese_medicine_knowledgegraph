@@ -2,7 +2,7 @@
 """实体链接器测试。"""
 
 from graph_qa.entity_linker import EntityIndex, EntityRecord
-from graph_qa.models import EntityCandidate
+from graph_qa.models import EntityCandidate, LinkedEntity
 
 
 def make_index() -> EntityIndex:
@@ -51,6 +51,102 @@ def test_direct_question_match_prefers_longest_entity_term():
         ("Disease", "风热咳嗽"),
         ("Symptom", "风热咳嗽"),
     }
+
+
+def test_direct_question_match_rejects_short_entity_inside_unknown_compound():
+    index = EntityIndex.from_records(
+        [
+            EntityRecord("Herb", "青果"),
+            EntityRecord("Effect", "功效"),
+        ]
+    )
+
+    linked = index.match([], "空青果有什么功效？")
+
+    assert linked == []
+
+
+def test_exact_prequestion_match_rejects_formula_component_names():
+    index = EntityIndex.from_records(
+        [
+            EntityRecord("Formula", "麝香追风膏"),
+            EntityRecord("Herb", "麝香"),
+        ]
+    )
+
+    linked = index.match_exact("麝香追风羔由哪些药材组成？")
+
+    assert linked == []
+
+
+def test_direct_question_match_accepts_entity_at_question_boundary():
+    linked = make_index().match_exact("麻黄有什么功效？")
+
+    assert [(item.label, item.name) for item in linked] == [("Herb", "麻黄")]
+
+
+def test_generic_entity_candidate_does_not_trigger_semantic_match():
+    class RecordingSemanticMatcher:
+        def __init__(self):
+            self.calls = []
+
+        def match(self, text):
+            self.calls.append(text)
+            return [
+                LinkedEntity(
+                    label="Effect",
+                    name="清热解毒",
+                    matched_text=text,
+                    match_type="semantic",
+                    score=0.8,
+                )
+            ]
+
+    semantic = RecordingSemanticMatcher()
+    index = EntityIndex.from_records(
+        [EntityRecord("Effect", "功效")],
+        semantic_index=semantic,
+    )
+
+    linked = index.match(
+        [EntityCandidate(text="功效", suggested_label="Effect")],
+        "九幽草有什么功效？",
+    )
+
+    assert linked == []
+    assert semantic.calls == []
+
+
+def test_fuzzy_match_keeps_supported_entity_suffix_variant():
+    index = EntityIndex.from_records([EntityRecord("Herb", "麻黄")])
+
+    linked = index.match(
+        [EntityCandidate(text="麻黄草", suggested_label="Herb")],
+        "麻黄草有什么功效？",
+    )
+
+    assert [(item.label, item.name, item.match_type) for item in linked] == [
+        ("Herb", "麻黄", "fuzzy")
+    ]
+
+
+def test_fuzzy_match_rejects_inserted_unknown_name_characters():
+    index = EntityIndex.from_records(
+        [
+            EntityRecord("Herb", "青果"),
+            EntityRecord("Herb", "石见穿", "紫参"),
+        ]
+    )
+
+    linked = index.match(
+        [
+            EntityCandidate(text="空青果", suggested_label="Herb"),
+            EntityCandidate(text="紫霄参", suggested_label="Herb"),
+        ],
+        "这些药材有什么功效？",
+    )
+
+    assert linked == []
 
 
 def test_candidate_linking_does_not_scan_unrequested_entities_from_full_question():
