@@ -280,6 +280,8 @@ docker compose -f compose.redis.yml up -d
 
 按 [.env.example](.env.example) 配置模型、Neo4j、API Key 和 Redis。API Key 至少 32 个字符，`GRAPH_QA_API_KEYS_JSON` 可以同时配置多个命名客户端，以支持独立限流和滚动轮换。
 
+`GRAPH_QA_VECTOR_ENABLED=true` 时，服务启动后使用 Sentence-Transformers 编码图谱实体，并建立 FAISS 索引。默认模型为 `BAAI/bge-small-zh-v1.5`，首次运行需要提前下载或允许访问模型仓库。精确名称和别名仍优先，仅在未命中时使用向量 Top-3 和阈值召回。
+
 启动单个 API 实例：
 
 ```powershell
@@ -311,7 +313,46 @@ Invoke-RestMethod `
   -Body $body
 ```
 
+首次调用会自动创建 `session_id` 并通过响应返回。后续问题在请求中带上该字段即可使用最近 5 轮上下文：
+
+```json
+{
+  "question": "它有什么禁忌？",
+  "session_id": "之前响应中的 session_id"
+}
+```
+
+流式接口使用 SSE，返回公开处理阶段、证据、回答 token、警告和完成事件：
+
+```powershell
+curl.exe -N `
+  -H "X-API-Key: your_api_key" `
+  -H "Content-Type: application/json" `
+  -H "Accept: text/event-stream" `
+  -d "{\"question\":\"麻黄有什么功效？\"}" `
+  http://127.0.0.1:8000/api/v1/qa/stream
+```
+
+删除会话：
+
+```powershell
+Invoke-WebRequest `
+  -Method Delete `
+  -Uri http://127.0.0.1:8000/api/v1/sessions/<session_id> `
+  -Headers $headers
+```
+
 限流默认按 `client_id` 共享为 10 次/60 秒，全局最大同时执行数为 4。Redis 不可用时接口失败关闭并返回 503，不会绕过限流。生产环境必须使用 HTTPS、Redis TLS/ACL 和独立的 Secret Manager；`GRAPH_QA_REDIS_URL` 不应包含在日志或 Git 中。
+
+启动 Streamlit 客户端：
+
+```powershell
+uv run streamlit run graph_qa/streamlit_app.py `
+  --server.address 127.0.0.1 `
+  --server.port 8501
+```
+
+Streamlit 使用 `GRAPH_QA_STREAMLIT_API_URL` 和 `GRAPH_QA_STREAMLIT_API_KEY`。左栏只展示公开的处理进度，不展示模型隐藏推理。
 
 Redis 共享状态集成测试默认跳过，确认测试 Redis 可用后显式启用：
 
@@ -319,6 +360,8 @@ Redis 共享状态集成测试默认跳过，确认测试 Redis 可用后显式�
 $env:GRAPH_QA_REDIS_TEST_URL = "redis://127.0.0.1:6379/0"
 uv run python -m pytest tests/test_graph_qa_redis_limits_integration.py -v
 ```
+
+真实 SSE、会话改写和向量索引验证应在已配置模型、Neo4j、Redis 的环境中进行。没有向量模型缓存时，可临时设置 `GRAPH_QA_VECTOR_ENABLED=false` 验证其余流程。
 
 ## 测试
 

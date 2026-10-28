@@ -311,44 +311,47 @@ Neo4j 只返回属性键和关系类型，不自动提供领域语义；同名�
 - 非中医直接回答保留 `grounded=false` 和“未使用图谱证据”提示，但不追加中医免责声明。
 - 图谱回答、澄清和无证据的中医问题继续附免责声明。
 
-## 3. 后续方案评估中的主要风险
+## 3. API、会话和前端实施结果
 
 ### 3.1 FastAPI
 
-课程中的 `/process` 可以作为思路，但生产实现还需要：
+已实现非流式与 SSE 接口，并包含：
 
 - Pydantic 请求和响应模型。
-- 健康检查、超时和稳定错误码。
-- 请求大小限制。
-- 鉴权和限流。
+- 健康检查、组件超时和稳定错误码。
+- 多 API Key 鉴权、Redis 限流和全局并发租约。
 - 不返回原始数据库异常或模型提示词。
+
+HTTP 层硬取消和完整请求体大小限制仍需由异步模型适配或反向代理补强。
 
 ### 3.2 Streamlit
 
-Streamlit 适合快速验证，但当前不进入 M1。后续需要避免：
+已实现 Streamlit 双栏客户端，并通过真实浏览器验证：
 
-- 未转义的模型 HTML。
-- 同步阻塞请求。
-- 把完整数据库异常直接显示给用户。
+- 左栏展示公开处理阶段，右栏展示流式回答。
+- 证据可以展开核对。
+- 客户端只显示稳定错误，不显示内部提示词或数据库异常。
 
-### 3.3 多用户与会话记忆
+### 3.3 会话记忆
 
-课件中的 `InMemorySaver` 和“用户 ID 即 thread ID”不适合生产：
+当前采用 Redis 轻量会话上下文，而不是保存完整 LangGraph 执行状态：
 
-- 重启后记忆丢失。
-- 同一用户的新旧对话共享上下文。
-- 缺少会话隔离和清理机制。
+- 作用域为 `(client_id, session_id)`。
+- 保存最近 5 轮问题、回答、已链接实体和 grounded 状态。
+- 默认 TTL 为 86400 秒，支持主动删除。
+- 同一会话通过 Redis 锁串行执行。
+- 不保存 Cypher、查询行、模型提示词和错误堆栈。
 
-后续必须区分 `user_id`、`session_id` 和 `request_id`，使用持久化 checkpointer。
+静态 API Key 不提供同一客户端内部的端用户身份隔离；正式多用户登录仍需 JWT/OIDC。
 
 ### 3.4 流式输出
 
-课件中的单例全局 `asyncio.Queue` 不适合并发和多进程。后续应使用请求级队列，并推送公开的阶段事件：
+使用 LangGraph `StreamWriter` 和请求级 SSE：
 
-- 正在识别实体。
-- 正在生成查询。
-- 正在执行图谱查询。
-- 正在生成答案。
+- `stage` 推送节点级处理进度。
+- `answer_delta` 推送答案 token。
+- `evidence`、`warning`、`error` 和 `done` 保持稳定事件类型。
+- 多 worker/多实例不共享全局用户队列。
 
 不得向前端暴露模型隐藏思维链。
 
@@ -367,8 +370,11 @@ Streamlit 适合快速验证，但当前不进入 M1。后续需要避免：
 - 黄金集只有 30 条，不能覆盖中医药表达的全部歧义。
 - 只支持单条固定三元组路径，不支持多跳查询、聚合查询和跨关系复杂问题。
 - 答案由大模型组织，仍可能出现表述偏差；调用方应展示证据供用户核对。
-- 没有持久化多轮记忆，同一进程外的上下文不会保留。
-- 没有 Web API、登录鉴权、限流和正式前端。
+- 会话只保留最近 5 轮，并绑定 API 客户端而非最终用户。
+- FAISS 模型需要提前下载；每个 worker 会持有独立模型和索引内存。
+- 真实向量召回阈值仍需在扩充黄金集上校准。
+- API 层没有可靠终止同步模型调用的硬取消机制。
+- Streamlit 仍属于验证界面，不是最终生产前端。
 - 没有在线临床验证，不能用于诊断、处方或替代医生。
 - 模型供应商或数据库不可用时，只能返回明确错误或证据降级结果。
 
@@ -382,11 +388,23 @@ uv run python -m pytest tests/ -v
 $env:GRAPH_QA_RUN_INTEGRATION = "1"
 uv run python -m pytest tests/test_graph_qa_integration.py -v
 
+# 真实 Redis 限流、并发和会话测试
+$env:GRAPH_QA_REDIS_TEST_URL = "redis://127.0.0.1:6379/0"
+uv run python -m pytest tests/test_graph_qa_redis_limits_integration.py -v
+
+# 真实 SSE、跨实例会话和模型集成
+$env:GRAPH_QA_RUN_API_INTEGRATION = "1"
+uv run python -m pytest tests/test_graph_qa_api_integration.py -v
+
 # 黄金问题集
 uv run python -m graph_qa.evaluate
 
 # 单条问答
 uv run python -m graph_qa.cli --question "麻黄有什么功效？" --show-query
+
+# API 与 Streamlit
+uv run uvicorn graph_qa.api:app --host 127.0.0.1 --port 8000
+uv run streamlit run graph_qa/streamlit_app.py
 ```
 
 任何涉及标签、关系方向、查询安全字段、重试策略或规则指标的修改，都应同时更新本文、接口文档、评测集和自动化测试。

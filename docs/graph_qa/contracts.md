@@ -20,7 +20,7 @@
 | `NEO4J_USER` | 是 | Neo4j 用户 |
 | `NEO4J_PASSWORD` | 是 | Neo4j 密码 |
 
-M1 计划增加以下可选参数，默认值由实现层统一定义：
+以下可选参数默认值由实现层统一定义：
 
 | 变量 | 建议默认值 | 含义 |
 | --- | ---: | --- |
@@ -28,6 +28,13 @@ M1 计划增加以下可选参数，默认值由实现层统一定义：
 | `GRAPH_QA_MAX_RESULTS` | `50` | 单次查询最多返回记录数 |
 | `GRAPH_QA_CYPHER_MAX_ATTEMPTS` | `3` | 查询首次生成加重试的总次数 |
 | `GRAPH_QA_ENTITY_LIMIT` | `10` | 每类实体最多保留的链接候选数 |
+| `GRAPH_QA_VECTOR_ENABLED` | `false` | 是否构建 FAISS 实体语义索引 |
+| `GRAPH_QA_EMBEDDING_MODEL` | `BAAI/bge-small-zh-v1.5` | Sentence-Transformers 模型名或本地路径 |
+| `GRAPH_QA_VECTOR_TOP_K` | `3` | 每次语义召回最多候选数 |
+| `GRAPH_QA_VECTOR_THRESHOLD` | `0.65` | 语义相似度最低阈值 |
+| `GRAPH_QA_SESSION_TTL_SECONDS` | `86400` | Redis 会话过期时间 |
+| `GRAPH_QA_SESSION_MAX_TURNS` | `5` | 最多保留的对话轮数 |
+| `GRAPH_QA_SESSION_LOCK_SECONDS` | `180` | 单会话分布式锁时间 |
 
 配置缺失或非法时必须在发起外部请求前失败，错误信息不得包含密钥值。
 
@@ -301,18 +308,21 @@ execute_read(cypher, parameters, timeout, max_rows) -> QueryResult
 
 ## 7. 后续 API 契约约束
 
-M2a 实现 FastAPI 非流式问答接口：
+FastAPI 当前提供以下接口：
 
 - `GET /health`
 - `POST /api/v1/qa`
+- `POST /api/v1/qa/stream`
+- `DELETE /api/v1/sessions/{session_id}`
 
 请求至少包含：
 
 ```text
 question: str, 1 到 500 字符
+session_id: optional uuid
 ```
 
-M2a 暂不接收 `session_id`，避免在没有会话存储时产生多轮记忆已经生效的误解。`session_id` 在 M3 实现持久化会话时加入。
+不传 `session_id` 时服务创建新会话，并在 `GraphQAResponse.session_id` 中返回。后续请求可携带该 ID 使用最近 5 轮上下文。会话不存在、已过期或属于其他 API 客户端时统一返回 404。
 
 成功响应和业务错误继续使用 `GraphQAResponse`。推荐 HTTP 状态映射：
 
@@ -321,6 +331,8 @@ M2a 暂不接收 `session_id`，避免在没有会话存储时产生多轮记忆
 | `200` | 正常回答、澄清、查询无记录 |
 | `400` | 输入请求或用户指令不安全 |
 | `401` | API Key 缺失或无效 |
+| `404` | 会话不存在、已过期或不属于当前客户端 |
+| `409` | 同一会话已有请求正在执行 |
 | `422` | 请求结构或问题长度不符合契约 |
 | `429` | 超过客户端限流额度 |
 | `500` | 未预期内部错误 |
@@ -330,30 +342,36 @@ M2a 暂不接收 `session_id`，避免在没有会话存储时产生多轮记忆
 
 API 使用 `X-API-Key` 静态凭据。多 worker/多实例共享 Redis 滑动窗口和全局并发租约；Redis 不可用时失败关闭。限流与并发状态不进入 M1 响应字段。
 
-HTTP 响应不得默认暴露原始提示词、模型隐藏推理和完整数据库异常。输出仍使用本节定义的答案、证据和错误码。M2a 不提供流式接口，流式事件契约继续留给 M3。
+HTTP 响应不得默认暴露原始提示词、模型隐藏推理和完整数据库异常。输出仍使用本节定义的答案、证据和错误码。
 
-`POST /api/v1/qa/stream` 继续作为后续预留接口，不在 M2a 实现。
+`POST /api/v1/qa/stream` 返回 `text/event-stream`。每个事件包含 `event` 名称和 JSON `data`：
 
-流式事件只能使用稳定公开类型：
+| 事件 | 数据 |
+| --- | --- |
+| `stage` | `stage`、中文 `label` |
+| `evidence` | `items` 数组 |
+| `answer_delta` | `delta` 文本 |
+| `warning` | `message` |
+| `error` | 稳定错误码与消息 |
+| `done` | 完整 `response` |
 
-- `stage`
-- `evidence`
-- `answer_delta`
-- `warning`
-- `error`
-- `done`
+阶段事件只表示公开处理进度，不表示模型隐藏思维链。
 
-后续实现不得为了流式展示而改变 M1 的非流式结果语义。
+流式接口不得改变非流式接口的最终答案、证据和错误语义。
 
-## 8. 会话契约预留
+## 8. 会话契约
 
-M3 需要区分：
+当前区分：
 
-- `user_id`：身份主体。
+- `client_id`：API Key 对应的安全主体。
 - `session_id`：一段独立对话。
 - `request_id`：单次问答。
 
-禁止把 `user_id` 直接当作 `thread_id`。M1 单次 CLI 调用不依赖会话状态。
+会话实际作用域为 `(client_id, session_id)`。不同 API Key 不能互相读取或删除会话。当前静态 API Key 不提供同一客户端内部的端用户隔离；需要该能力时应接入 JWT/OIDC 等用户身份。
+
+Redis 只保存最近 5 轮问题、回答、已链接实体、grounded 状态和时间戳。默认 TTL 为 86400 秒，不保存 Cypher、完整查询行、模型提示词或错误堆栈。单个会话使用 Redis 分布式锁，禁止并发覆盖历史。
+
+M1 CLI 和评测继续使用无会话调用，不依赖 Redis 会话状态。
 
 ## 9. 兼容性要求
 
