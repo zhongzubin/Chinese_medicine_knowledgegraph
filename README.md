@@ -282,6 +282,10 @@ uv run python -m graph_qa.evaluate `
 
 - [初始实体召回路径评测报告](docs/graph_qa/retrieval-evaluation-2026-10-28.md)。
 - [实体边界与 grounded 修复记录](docs/graph_qa/retrieval-boundary-fix-2026-10-28.md)。
+- [黄金集验收门槛与退出码说明](docs/graph_qa/evaluation-acceptance-2026-10-28.md)。
+
+评测退出码按文档阈值判断；`outcome_accuracy` 作为质量观察指标，
+不要求固定测试集必须达到 100%。
 
 真实 Neo4j 和模型集成测试默认跳过，确认服务可用后显式启用：
 
@@ -409,8 +413,9 @@ uv run python -m pytest tests/ -v
 - 单 worker FastAPI、API Key、Redis 会话、SSE 和 Streamlit。
 - 本地 BGE-large、11,043 实体 FAISS 索引和持久化缓存。
 - 5 轮语义改写、同名异标签、只读 Cypher 和证据回答。
-- 全量测试 138 passed、5 skipped；真实 120 条评测 outcome 通过 116 条。
+- 全量测试 141 passed、5 skipped；真实 120 条评测 outcome 通过 116 条。
 - 纯召回 Recall@3 为 100%；完整工作流实体 Recall@3 为 96.67%。
+- Cypher 通过率、查询执行成功率、安全拦截率和 grounded 覆盖率均通过验收门槛。
 
 明确不做：
 
@@ -419,7 +424,6 @@ uv run python -m pytest tests/ -v
 
 下一步建议：
 
-1. 针对剩余 semantic 误召回建立独立调参/负样本集。
-2. 改进属性级 Effect 候选抽取和 clarification 评测口径。
-3. 补 5 轮追问评测，再评估阈值和 reranker。
-4. 补齐 API 请求级超时、监控指标和部署说明。
+1. 补齐 API 请求级超时、可靠取消、监控指标和部署说明。
+2. 补 5 轮追问评测。
+3. semantic 阈值、reranker 和 clarification 口径作为独立后续任务。

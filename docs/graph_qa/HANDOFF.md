@@ -1,10 +1,10 @@
 # 知识图谱问答交接说明
 
-> 代码基线：`c99cb6d`
+> 代码基线：`688d868`
 >
 > 交接日期：2026-10-28
 >
-> 当前分支：`codex/graph-qa-retrieval-boundaries`
+> 当前分支：`codex/graph-qa-evaluation-gates`
 
 本文用于新对话快速恢复上下文。开始开发前仍须完整阅读 `AGENTS.md`、`docs/graph_qa/README.md`、`architecture.md`、`contracts.md`、`security-and-evaluation.md` 和 `implementation-challenges.md`。
 
@@ -151,7 +151,7 @@ uv run streamlit run graph_qa/streamlit_app.py
 
 ## 9. 验证基线
 
-- 当前全量 pytest：`138 passed, 5 skipped`。
+- 当前全量 pytest：`141 passed, 5 skipped`。
 - 真实 Neo4j + 模型集成：通过。
 - Redis 限流、并发、会话集成：通过。
 - 真实跨实例 SSE 会话：通过。
@@ -160,6 +160,7 @@ uv run streamlit run graph_qa/streamlit_app.py
 - 未知实体误召回率：`13.33%`；semantic 路径 Recall@3：`85%`。
 - 修复前基线：[retrieval-evaluation-2026-10-28.md](retrieval-evaluation-2026-10-28.md)。
 - 本轮修复记录：[retrieval-boundary-fix-2026-10-28.md](retrieval-boundary-fix-2026-10-28.md)。
+- 验收门槛记录：[evaluation-acceptance-2026-10-28.md](evaluation-acceptance-2026-10-28.md)。
 - Streamlit 已回答、进度、证据、追问和清空会话的真实浏览器测试。
 - 浏览器截图：`output/playwright/graph-qa-streamlit.png`。
 
@@ -178,6 +179,7 @@ uv run python -m pytest tests/ -v
 - `0.56` 阈值仍有 2 条低分 semantic 未知实体误召回，需后续单独校准。
 - 长未知词子串、通用词语义候选和无关证据 grounded 已完成首轮修复。
 - 属性级 Effect 候选仍可能被 Disease、Symptom 或通用部位词抢占。
+- 当前没有显式 `no_evidence` 黄金样本，空结果诚实率标记为未评估。
 - 会话作用域是 API 客户端，不是最终登录用户。
 - 当前本地运行目标为单 worker；每个 worker 会重复加载约 1.3GB BGE 模型。
 - 没有可靠的 API 请求级硬取消，仍依赖模型和 Neo4j 组件超时。
@@ -188,44 +190,46 @@ uv run python -m pytest tests/ -v
 
 - 初始 120 条评测提交：`793f7d2`、`c09a6e1`。
 - 边界与 grounded 修复提交：`c99cb6d`。
-- 全量 pytest：`138 passed, 5 skipped`。
+- 验收门槛提交：`688d868`。
+- 全量 pytest：`141 passed, 5 skipped`。
 - 真实 120 条 outcome：`116/120`；grounded 证据覆盖率：100%。
+- Cypher 通过率：100%；查询执行成功率：100%；`acceptance.passed=true`。
 - 完整逐题 JSON 保存在本地
   `output/graph_qa/evaluation-120-retrieval-boundaries-final-2026-10-28.json`；
   `output/` 被 Git 忽略，不应依赖该文件恢复结论。
 
 ## 12. 下一步
 
-首轮边界修复已完成，下一轮优先处理剩余 semantic 精度：
+检索评测已按文档门槛收口，不再追固定集 100%。下一项进入 API 工程化：
 
-1. 针对 2 条低分 semantic 未知实体误召回建立调参/负样本集。
-2. 改进属性级 Effect 候选抽取，避免 Disease/Symptom 抢占。
-3. 明确 clarification 可接受措辞并更新评测规则。
-4. 补充 5 轮追问评测。
-5. 再进入 API 请求级超时、监控和部署收尾。
+1. 增加请求级超时和可靠的取消/超时收口。
+2. 补充请求计数、延迟、错误码和模型/图查询耗时指标。
+3. 完善部署说明和健康检查边界。
+4. 5 轮追问评测作为独立评测任务保留。
+5. semantic 阈值、reranker 和 clarification 文本口径暂不继续调优。
 
 ### 12.1 下一任务准备说明
 
-上一任务已按高风险流程完成。下一任务若继续调整 semantic 阈值或 reranker，仍需提交方案并确认。
+评测验收门槛任务已完成。下一项 API 超时与监控涉及核心请求链路，开始编码前仍需提交方案并确认。
 
 建议范围：
 
-- `graph_qa/entity_linker.py`：阈值、候选排序或 reranker。
-- `graph_qa/workflow.py`：仅在新的候选选择状态需要时修改。
-- `tests/test_entity_linker.py`、`tests/test_semantic_index.py`：增加阈值和负样本回归。
-- `evaluation/qa_cases.jsonl`：优先保持 120 条基线可比性，新增调参集应独立标注。
+- `graph_qa/api.py`：请求超时、取消和错误映射。
+- `graph_qa/workflow.py`：仅在需要显式取消信号时修改。
+- 监控适配与健康检查：不记录用户全文、密钥或完整异常。
+- 测试：API 超时、组件超时、错误码和并发释放。
 
 验收重点：
 
-- 不降低已修复的子串、通用词和 grounded 边界。
-- 原有 exact、alias、同名异标签、fuzzy 和 semantic 正常路径不回归。
-- 全量 pytest 通过；真实 120 条评测重跑并与本报告逐项比较。
-- 安全拦截率保持 100%，不新增内容生成或多 worker 能力。
+- API 请求超时后不得继续占用并发租约或写入不完整会话。
+- 原有安全、会话隔离、SSE 和 grounded 语义不回归。
+- 全量 pytest 和真实 API 集成测试通过。
+- 不新增内容生成或多 worker 运行目标。
 
 回滚方式：
 
-- 当前修复基线为 `c99cb6d`；后续任务另建分支。
-- 出现不可接受回归时回退到 `c99cb6d` 或原稳定基线 `c09a6e1`。
+- 当前基线为 `688d868`；后续任务另建分支。
+- 出现不可接受回归时回退到 `688d868` 或 `c99cb6d`。
 
 ## 13. 新对话建议开场
 
@@ -233,8 +237,7 @@ uv run python -m pytest tests/ -v
 继续开发 D:\code\github-clong\Chinese_medicine_knowledgegraph。
 先读取 AGENTS.md 和 docs/graph_qa/HANDOFF.md，再检查 git status。
 当前不实现内容生成，也不以多 worker 为运行目标。
-先读取 docs/graph_qa/retrieval-boundary-fix-2026-10-28.md。
-下一步优先处理剩余 semantic 误召回、Effect 候选抽取和 clarification 口径，
-修改后重复运行 120 条黄金集。
+先读取 docs/graph_qa/evaluation-acceptance-2026-10-28.md。
+下一项实现 API 请求级超时、取消、监控和部署收尾。
 开发前按 AGENTS.md 给出方案并等待确认。
 ```
