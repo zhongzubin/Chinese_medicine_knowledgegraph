@@ -19,6 +19,11 @@ from graph_qa.schema import DEFAULT_METADATA_PATH, GraphSchema, SchemaError
 from graph_qa.workflow import GraphQAEngine
 
 EngineFactory = Callable[[Optional[str], int], GraphQAEngine]
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_LOCAL_EMBEDDING_MODEL = (
+    PROJECT_ROOT / "models" / "bge-large-zh-v1.5"
+)
+FALLBACK_EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
 
 
 class CLIConfigError(RuntimeError):
@@ -76,6 +81,22 @@ def _read_probability(name: str, default: float) -> float:
     return value
 
 
+def _resolve_embedding_model_reference(value: Optional[str] = None) -> str:
+    raw = (value or "").strip()
+    if raw:
+        model_path = Path(raw).expanduser()
+        if not model_path.is_absolute():
+            project_relative = PROJECT_ROOT / model_path
+            if project_relative.exists():
+                return str(project_relative.resolve())
+        if model_path.exists():
+            return str(model_path.resolve())
+        return raw
+    if DEFAULT_LOCAL_EMBEDDING_MODEL.exists():
+        return str(DEFAULT_LOCAL_EMBEDDING_MODEL.resolve())
+    return FALLBACK_EMBEDDING_MODEL
+
+
 def _build_entity_index(repository: Neo4jRepository):
     entity_index = repository.load_entity_index()
     if not _read_bool("GRAPH_QA_VECTOR_ENABLED", False):
@@ -87,16 +108,17 @@ def _build_entity_index(repository: Neo4jRepository):
         SentenceTransformerEncoder,
     )
 
-    model_name = (
+    model_name = _resolve_embedding_model_reference(
         os.getenv("GRAPH_QA_EMBEDDING_MODEL")
-        or "BAAI/bge-small-zh-v1.5"
-    ).strip()
+    )
     top_k = _read_positive_int("GRAPH_QA_VECTOR_TOP_K", 3)
-    threshold = _read_probability("GRAPH_QA_VECTOR_THRESHOLD", 0.65)
+    threshold = _read_probability("GRAPH_QA_VECTOR_THRESHOLD", 0.56)
     try:
-        semantic_index = SemanticEntityIndex(
+        semantic_index = SemanticEntityIndex.load_or_build(
             entity_index.entries,
             SentenceTransformerEncoder(model_name),
+            cache_dir=PROJECT_ROOT / ".cache" / "graph_qa" / "faiss",
+            cache_identity=model_name,
             top_k=top_k,
             threshold=threshold,
         )

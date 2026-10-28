@@ -47,6 +47,12 @@ class SemanticEncoder(FakeEncoder):
         return np.asarray(vectors, dtype=np.float32)
 
 
+class FailOnBuildEncoder:
+    def encode(self, texts, **kwargs):
+        del texts, kwargs
+        raise AssertionError("cached index should not rebuild")
+
+
 def make_semantic_index(threshold=0.65):
     entries = [
         EntityIndexEntry("Herb", "麻黄", ("龙沙",)),
@@ -104,3 +110,48 @@ def test_entity_index_uses_semantic_fallback_when_exact_match_misses():
     assert len(results) == 1
     assert results[0].name == "麻黄"
     assert results[0].match_type == "semantic"
+
+
+def test_entity_index_prefers_high_confidence_fuzzy_over_noisy_semantic():
+    semantic = FakeSemanticMatcher()
+    index = EntityIndex.from_records(
+        [
+            EntityRecord("Herb", "麻黄", "龙沙"),
+            EntityRecord("Herb", "天麻"),
+        ],
+        semantic_index=semantic,
+    )
+
+    results = index.match(
+        [EntityCandidate(text="麻黄草")],
+        "麻黄草有什么功效？",
+    )
+
+    assert results[0].name == "麻黄"
+    assert results[0].match_type == "fuzzy"
+    assert all(item.match_type != "semantic" for item in results)
+
+
+def test_semantic_faiss_index_is_reused_from_disk_cache(tmp_path):
+    entries = [
+        EntityIndexEntry("Herb", "麻黄", ("龙沙",)),
+        EntityIndexEntry("Herb", "桂枝", ()),
+    ]
+    first = SemanticEntityIndex.load_or_build(
+        entries,
+        SemanticEncoder(),
+        cache_dir=tmp_path,
+        cache_identity="local-bge",
+        threshold=0.5,
+    )
+    second = SemanticEntityIndex.load_or_build(
+        entries,
+        FailOnBuildEncoder(),
+        cache_dir=tmp_path,
+        cache_identity="local-bge",
+        threshold=0.5,
+    )
+
+    assert first.cache_hit is False
+    assert second.cache_hit is True
+    assert len(list(tmp_path.glob("entities-*.faiss"))) == 1

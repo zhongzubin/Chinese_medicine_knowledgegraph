@@ -215,17 +215,11 @@ class EntityIndex:
                 )
             results.extend(exact_matches)
             if len(results) == result_count_before_candidate:
-                semantic_matches = (
-                    self.semantic_index.match(candidate.text)
-                    if self.semantic_index is not None
-                    else []
-                )
-                if semantic_matches:
-                    results.extend(semantic_matches)
-                else:
-                    results.extend(
-                        self._fuzzy_matches(candidate, fuzzy_threshold)
-                    )
+                fuzzy_matches = self._fuzzy_matches(candidate, fuzzy_threshold)
+                if fuzzy_matches:
+                    results.extend(fuzzy_matches)
+                elif self.semantic_index is not None:
+                    results.extend(self.semantic_index.match(candidate.text))
 
         if not results:
             results.extend(self._direct_question_matches(normalized_question, None))

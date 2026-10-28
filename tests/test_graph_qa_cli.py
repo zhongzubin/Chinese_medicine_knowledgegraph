@@ -4,6 +4,7 @@
 import json
 from argparse import Namespace
 
+from graph_qa import cli
 from graph_qa.cli import CLIConfigError, parse_args, render_text, run
 from graph_qa.models import (
     ErrorCode,
@@ -131,3 +132,32 @@ def test_error_response_uses_safety_exit_code():
     exit_code, _output = run(args, engine_factory=lambda database, max_results: engine)
 
     assert exit_code == 4
+
+
+def test_embedding_model_prefers_existing_local_directory(
+    monkeypatch,
+    tmp_path,
+):
+    local_model = tmp_path / "bge-local"
+    local_model.mkdir()
+    monkeypatch.setattr(cli, "DEFAULT_LOCAL_EMBEDDING_MODEL", local_model)
+
+    assert cli._resolve_embedding_model_reference() == str(local_model.resolve())
+    assert cli._resolve_embedding_model_reference(str(local_model)) == str(
+        local_model.resolve()
+    )
+
+
+def test_embedding_model_keeps_remote_name_when_local_model_is_absent(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        cli,
+        "DEFAULT_LOCAL_EMBEDDING_MODEL",
+        cli.PROJECT_ROOT / "models" / "missing-model",
+    )
+
+    assert (
+        cli._resolve_embedding_model_reference("BAAI/example-model")
+        == "BAAI/example-model"
+    )

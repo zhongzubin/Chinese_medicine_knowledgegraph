@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 """基于 Sentence-Transformers 和 FAISS 的实体语义召回。"""
 
+import hashlib
+import json
 import threading
+from pathlib import Path
+from typing import Optional
 from typing import Protocol, Sequence
 
 import faiss
@@ -71,6 +75,8 @@ class SemanticEntityIndex:
         top_k: int = 3,
         threshold: float = 0.65,
         batch_size: int = 64,
+        index: Optional[faiss.Index] = None,
+        cache_hit: bool = False,
     ):
         if top_k < 1:
             raise ValueError("top_k 必须大于等于 1")
@@ -86,22 +92,94 @@ class SemanticEntityIndex:
         self.top_k = top_k
         self.threshold = threshold
         self.batch_size = batch_size
-        texts = [self._entity_text(entry) for entry in self.entries]
-        vectors = np.asarray(
-            encoder.encode(
-                texts,
+        self.cache_hit = cache_hit
+        if index is not None:
+            self._index = index
+        else:
+            texts = [self._entity_text(entry) for entry in self.entries]
+            vectors = np.asarray(
+                encoder.encode(
+                    texts,
+                    batch_size=batch_size,
+                    normalize_embeddings=True,
+                    convert_to_numpy=True,
+                    show_progress_bar=False,
+                ),
+                dtype=np.float32,
+            )
+            if vectors.ndim != 2 or len(vectors) != len(self.entries):
+                raise SemanticIndexError("实体向量输出维度不正确")
+            faiss.normalize_L2(vectors)
+            self._index = faiss.IndexFlatIP(vectors.shape[1])
+            self._index.add(vectors)
+
+    @classmethod
+    def load_or_build(
+        cls,
+        entries: Sequence[EntityIndexEntry],
+        encoder: TextEncoder,
+        *,
+        cache_dir: Optional[Path] = None,
+        cache_identity: str = "",
+        top_k: int = 3,
+        threshold: float = 0.5,
+        batch_size: int = 64,
+    ) -> "SemanticEntityIndex":
+        if cache_dir is None:
+            return cls(
+                entries,
+                encoder,
+                top_k=top_k,
+                threshold=threshold,
                 batch_size=batch_size,
-                normalize_embeddings=True,
-                convert_to_numpy=True,
-                show_progress_bar=False,
-            ),
-            dtype=np.float32,
+            )
+
+        payload = json.dumps(
+            [
+                {
+                    "label": entry.label,
+                    "name": entry.name,
+                    "aliases": list(entry.aliases),
+                }
+                for entry in entries
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
         )
-        if vectors.ndim != 2 or len(vectors) != len(self.entries):
-            raise SemanticIndexError("实体向量输出维度不正确")
-        faiss.normalize_L2(vectors)
-        self._index = faiss.IndexFlatIP(vectors.shape[1])
-        self._index.add(vectors)
+        fingerprint = hashlib.sha256(
+            f"{cache_identity}\0{payload}".encode("utf-8")
+        ).hexdigest()[:20]
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / f"entities-{fingerprint}.faiss"
+        if cache_path.exists():
+            try:
+                cached_index = faiss.read_index(str(cache_path))
+                return cls(
+                    entries,
+                    encoder,
+                    top_k=top_k,
+                    threshold=threshold,
+                    batch_size=batch_size,
+                    index=cached_index,
+                    cache_hit=True,
+                )
+            except Exception:
+                cache_path.unlink(missing_ok=True)
+
+        result = cls(
+            entries,
+            encoder,
+            top_k=top_k,
+            threshold=threshold,
+            batch_size=batch_size,
+        )
+        temporary_path = cache_path.with_suffix(".tmp")
+        try:
+            faiss.write_index(result._index, str(temporary_path))
+            temporary_path.replace(cache_path)
+        except Exception:
+            temporary_path.unlink(missing_ok=True)
+        return result
 
     @staticmethod
     def _entity_text(entry: EntityIndexEntry) -> str:
