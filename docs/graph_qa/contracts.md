@@ -29,9 +29,9 @@
 | `GRAPH_QA_CYPHER_MAX_ATTEMPTS` | `3` | 查询首次生成加重试的总次数 |
 | `GRAPH_QA_ENTITY_LIMIT` | `10` | 每类实体最多保留的链接候选数 |
 | `GRAPH_QA_VECTOR_ENABLED` | `false` | 是否构建 FAISS 实体语义索引 |
-| `GRAPH_QA_EMBEDDING_MODEL` | `BAAI/bge-small-zh-v1.5` | Sentence-Transformers 模型名或本地路径 |
+| `GRAPH_QA_EMBEDDING_MODEL` | `models/bge-large-zh-v1.5` | Sentence-Transformers 模型名或本地路径 |
 | `GRAPH_QA_VECTOR_TOP_K` | `3` | 每次语义召回最多候选数 |
-| `GRAPH_QA_VECTOR_THRESHOLD` | `0.65` | 语义相似度最低阈值 |
+| `GRAPH_QA_VECTOR_THRESHOLD` | `0.56` | 语义相似度最低阈值 |
 | `GRAPH_QA_SESSION_TTL_SECONDS` | `86400` | Redis 会话过期时间 |
 | `GRAPH_QA_SESSION_MAX_TURNS` | `5` | 最多保留的对话轮数 |
 | `GRAPH_QA_SESSION_LOCK_SECONDS` | `180` | 单会话分布式锁时间 |

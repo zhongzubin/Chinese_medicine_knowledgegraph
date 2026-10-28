@@ -270,7 +270,7 @@ uv run python -m pytest tests/test_graph_qa_integration.py -v
 
 ### 6. 知识图谱问答 API
 
-API 支持 Uvicorn 多 worker 和多实例部署。API Key 校验无状态，限流与全局并发租约通过共享 Redis 协调。
+当前本地演示按单个 Uvicorn worker 运行。Redis 中保留了跨实例限流和会话状态，但本地 BGE-large 会为每个 worker 单独占用约 1.3GB 模型内存，因此在未拆分独立嵌入服务前不建议开启多个 worker。
 
 先启动本地 Redis：
 
@@ -280,18 +280,14 @@ docker compose -f compose.redis.yml up -d
 
 按 [.env.example](.env.example) 配置模型、Neo4j、API Key 和 Redis。API Key 至少 32 个字符，`GRAPH_QA_API_KEYS_JSON` 可以同时配置多个命名客户端，以支持独立限流和滚动轮换。
 
-`GRAPH_QA_VECTOR_ENABLED=true` 时，服务启动后使用 Sentence-Transformers 编码图谱实体，并建立 FAISS 索引。默认模型为 `BAAI/bge-small-zh-v1.5`，首次运行需要提前下载或允许访问模型仓库。精确名称和别名仍优先，仅在未命中时使用向量 Top-3 和阈值召回。
+`GRAPH_QA_VECTOR_ENABLED=true` 时，服务启动后使用 Sentence-Transformers 编码图谱实体，并建立 FAISS 索引。默认优先使用项目内的 `models/bge-large-zh-v1.5`，本地模型缺失时才回退到远程模型。精确名称和别名优先；高置信字符串 fuzzy 其次；两者都未命中时才使用向量 Top-3 和阈值召回。
+
+完整 1.1 万实体索引首次构建在当前机器上约需 10 分钟，结果会保存到 `.cache/graph_qa/faiss/`。实体集合或模型路径不变时，后续启动直接加载缓存；本地模型加载加索引加载约需数秒。
 
 启动单个 API 实例：
 
 ```powershell
 uv run uvicorn graph_qa.api:app --host 127.0.0.1 --port 8000
-```
-
-启动多个 Uvicorn worker：
-
-```powershell
-uv run uvicorn graph_qa.api:app --host 127.0.0.1 --port 8000 --workers 4
 ```
 
 检查服务：
