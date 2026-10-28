@@ -165,6 +165,13 @@ def _check_unknown_identifiers(masked: str, schema: GraphSchema) -> list[re.Matc
                 ErrorCode.CYPHER_REJECTED,
                 f"查询使用了元数据之外的属性: {property_name}",
             )
+    for match in MAP_PROPERTY_RE.finditer(masked):
+        property_name = match.group(1)
+        if property_name not in schema.property_keys and property_name != "name":
+            raise CypherGuardError(
+                ErrorCode.CYPHER_REJECTED,
+                f"查询使用了元数据之外的属性: {property_name}",
+            )
     return patterns
 
 
@@ -280,13 +287,6 @@ def _validate_evidence_expressions(
         ErrorCode.CYPHER_REJECTED,
         "证据字段没有引用同一条合法三元组路径",
     )
-    for match in MAP_PROPERTY_RE.finditer(masked):
-        property_name = match.group(1)
-        if property_name not in schema.property_keys and property_name != "name":
-            raise CypherGuardError(
-                ErrorCode.CYPHER_REJECTED,
-                f"查询使用了元数据之外的属性: {property_name}",
-            )
 
 
 def detect_unsafe_question(question: str) -> Optional[str]:

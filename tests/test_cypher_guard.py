@@ -112,6 +112,20 @@ def test_missing_parameter_is_rejected():
         CypherGuard(make_schema()).validate(make_plan(VALID_QUERY, parameters={}))
 
 
+def test_unknown_property_in_map_is_rejected():
+    query = VALID_QUERY.replace(
+        "RETURN subject.name AS subject,",
+        (
+            "WITH subject, relationship, object, "
+            "subject {missing_property: 1} AS properties\n"
+            "RETURN subject.name AS subject,"
+        ),
+    )
+
+    with pytest.raises(CypherGuardError, match="missing_property"):
+        CypherGuard(make_schema()).validate(make_plan(query))
+
+
 def test_unknown_triple_direction_is_rejected():
     reversed_query = VALID_QUERY.replace(
         "MATCH (subject:Herb)-[relationship:HAS_EFFECT]->(object:Effect)",
