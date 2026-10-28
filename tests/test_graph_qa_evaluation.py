@@ -6,6 +6,7 @@ from collections import Counter
 from graph_qa.evaluate import (
     DEFAULT_CASES_PATH,
     EvaluationCase,
+    assess_acceptance,
     evaluate_cases,
     evaluate_retrieval,
     load_cases,
@@ -15,9 +16,11 @@ from graph_qa.evaluate import (
 from graph_qa.models import (
     EntityCandidate,
     Evidence,
+    ErrorCode,
     GraphQAResponse,
     IntentResult,
     LinkedEntity,
+    QueryInfo,
 )
 
 
@@ -101,6 +104,13 @@ def test_evaluate_cases_and_summary_metrics():
                     score=1.0,
                 )
             ],
+            query=QueryInfo(
+                cypher=(
+                    "MATCH (subject:Herb)-[:HAS_EFFECT]->(object:Effect) "
+                    "WHERE subject.name IN $entity_names RETURN object.name LIMIT 20"
+                ),
+                parameters={"entity_names": ["麻黄"]},
+            ),
             evidence=[
                 Evidence(
                     subject="麻黄",
@@ -145,10 +155,116 @@ def test_evaluate_cases_and_summary_metrics():
     assert summary["workflow_match_type_counts"]["name"] == 1
     assert summary["pattern_cases_evaluated"] == 1
     assert summary["pattern_match_rate"] == 1.0
+    assert summary["cypher_cases_evaluated"] == 1
+    assert summary["cypher_pass_rate"] == 1.0
+    assert summary["query_execution_cases_evaluated"] == 1
+    assert summary["query_execution_success_rate"] == 1.0
     assert summary["grounded_evidence_coverage"] == 1.0
     assert summary["unknown_entity_cases_evaluated"] == 0
     assert summary["unknown_entity_false_recall_rate"] is None
     assert summary["failures"] == []
+
+
+def test_query_metrics_keep_execution_failure_after_valid_cypher():
+    cases = [
+        EvaluationCase(
+            id="success",
+            category="herb_effect",
+            question="麻黄有什么功效？",
+            expected_intent=True,
+            expected_outcome="grounded_answer",
+        ),
+        EvaluationCase(
+            id="timeout",
+            category="herb_effect",
+            question="桂枝有什么功效？",
+            expected_intent=True,
+            expected_outcome="grounded_answer",
+        ),
+        EvaluationCase(
+            id="rejected",
+            category="herb_effect",
+            question="人参有什么功效？",
+            expected_intent=True,
+            expected_outcome="grounded_answer",
+        ),
+    ]
+    responses = {
+        "麻黄有什么功效？": GraphQAResponse(
+            question="麻黄有什么功效？",
+            answer="麻黄具有发汗功效。",
+            grounded=True,
+            query=QueryInfo(
+                cypher="MATCH (subject:Herb) RETURN subject.name LIMIT 20",
+                parameters={},
+            ),
+        ),
+        "桂枝有什么功效？": GraphQAResponse(
+            question="桂枝有什么功效？",
+            answer="图谱查询失败。",
+            grounded=False,
+            error={
+                "code": ErrorCode.QUERY_TIMEOUT,
+                "message": "图谱查询超时",
+            },
+        ),
+        "人参有什么功效？": GraphQAResponse(
+            question="人参有什么功效？",
+            answer="查询被拒绝。",
+            grounded=False,
+            error={
+                "code": ErrorCode.CYPHER_REJECTED,
+                "message": "查询被拒绝",
+            },
+        ),
+    }
+
+    summary = summarize(
+        evaluate_cases(FakeEvaluationEngine(responses), cases)
+    )
+
+    assert summary["cypher_cases_evaluated"] == 3
+    assert summary["cypher_pass_rate"] == 0.6667
+    assert summary["query_execution_cases_evaluated"] == 2
+    assert summary["query_execution_success_rate"] == 0.5
+
+
+def test_acceptance_uses_documented_thresholds_not_outcome_100():
+    summary = {
+        "outcome_accuracy": 0.95,
+        "intent_accuracy": 0.95,
+        "entity_recall_at_3": 0.90,
+        "cypher_pass_rate": 0.95,
+        "query_execution_success_rate": 0.98,
+        "grounded_evidence_coverage": 1.0,
+        "safety_rejection_rate": 1.0,
+        "empty_result_honesty_rate": None,
+    }
+
+    acceptance = assess_acceptance(summary)
+
+    assert acceptance["passed"] is True
+    assert acceptance["failed_metrics"] == []
+    assert acceptance["not_evaluated_metrics"] == [
+        "empty_result_honesty_rate"
+    ]
+
+
+def test_acceptance_fails_when_safety_below_required_threshold():
+    summary = {
+        "intent_accuracy": 1.0,
+        "entity_recall_at_3": 1.0,
+        "cypher_pass_rate": 1.0,
+        "query_execution_success_rate": 1.0,
+        "grounded_evidence_coverage": 1.0,
+        "safety_rejection_rate": 0.99,
+        "empty_result_honesty_rate": 1.0,
+    }
+
+    acceptance = assess_acceptance(summary)
+
+    assert acceptance["passed"] is False
+    assert acceptance["failed_metrics"] == ["safety_rejection_rate"]
 
 
 def test_retrieval_path_metrics_and_unknown_false_recall():

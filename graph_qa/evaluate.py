@@ -16,6 +16,19 @@ from graph_qa.models import EntityCandidate, ErrorCode, GraphQAResponse, LinkedE
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CASES_PATH = PROJECT_ROOT / "evaluation" / "qa_cases.jsonl"
 MatchPath = Literal["exact", "fuzzy", "semantic"]
+ACCEPTANCE_THRESHOLDS: Dict[str, float] = {
+    "intent_accuracy": 0.90,
+    "entity_recall_at_3": 0.85,
+    "cypher_pass_rate": 0.90,
+    "query_execution_success_rate": 0.95,
+    "grounded_evidence_coverage": 1.0,
+    "safety_rejection_rate": 1.0,
+    "empty_result_honesty_rate": 1.0,
+}
+QUERY_EXECUTION_ERROR_CODES = {
+    ErrorCode.QUERY_TIMEOUT,
+    ErrorCode.QUERY_EXECUTION_FAILED,
+}
 
 
 class EvaluationModel(BaseModel):
@@ -84,6 +97,9 @@ class EvaluationRecord(EvaluationModel):
     entity_matches: List[EntityMatchRecord] = Field(default_factory=list)
     pattern_matched: Optional[bool]
     unknown_entity_evaluated: bool
+    cypher_passed: Optional[bool]
+    query_execution_succeeded: Optional[bool]
+    empty_result_honest: Optional[bool]
     error_code: Optional[str]
     elapsed_ms: int
     response: Dict[str, Any]
@@ -227,6 +243,26 @@ def _pattern_matched(case: EvaluationCase, response: GraphQAResponse) -> Optiona
     )
 
 
+def _cypher_passed(response: GraphQAResponse) -> bool:
+    """查询成功，或已进入执行阶段后才发生 Neo4j 失败。"""
+    if response.query is not None:
+        return True
+    return (
+        response.error is not None
+        and response.error.code in QUERY_EXECUTION_ERROR_CODES
+    )
+
+
+def _query_execution_succeeded(response: GraphQAResponse) -> bool:
+    return (
+        response.query is not None
+        and (
+            response.error is None
+            or response.error.code not in QUERY_EXECUTION_ERROR_CODES
+        )
+    )
+
+
 def evaluate_cases(
     engine: EvaluationEngine,
     cases: Sequence[EvaluationCase],
@@ -245,6 +281,16 @@ def evaluate_cases(
             case,
             response.linked_entities,
         )
+        expects_query = (
+            case.expected_intent is True
+            and case.expected_outcome in {"grounded_answer", "no_evidence"}
+        )
+        cypher_passed = _cypher_passed(response) if expects_query else None
+        query_execution_succeeded = (
+            _query_execution_succeeded(response)
+            if cypher_passed is True
+            else None
+        )
         records.append(
             EvaluationRecord(
                 case_id=case.id,
@@ -258,6 +304,13 @@ def evaluate_cases(
                 unknown_entity_evaluated=(
                     case.category == "missing_entity"
                     and not case.expected_entities
+                ),
+                cypher_passed=cypher_passed,
+                query_execution_succeeded=query_execution_succeeded,
+                empty_result_honest=(
+                    _outcome_matches(case, response)
+                    if case.expected_outcome == "no_evidence"
+                    else None
                 ),
                 error_code=response.error.code.value if response.error else None,
                 elapsed_ms=elapsed_ms,
@@ -348,6 +401,19 @@ def summarize(records: Sequence[EvaluationRecord]) -> Dict[str, Any]:
     unknown_entity_records = [
         record for record in records if record.unknown_entity_evaluated
     ]
+    cypher_records = [
+        record for record in records if record.cypher_passed is not None
+    ]
+    query_execution_records = [
+        record
+        for record in records
+        if record.query_execution_succeeded is not None
+    ]
+    empty_result_records = [
+        record
+        for record in records
+        if record.empty_result_honest is not None
+    ]
     latencies = [record.elapsed_ms for record in records]
 
     def ratio(numerator: int, denominator: int) -> Optional[float]:
@@ -385,6 +451,19 @@ def summarize(records: Sequence[EvaluationRecord]) -> Dict[str, Any]:
             sum(bool(record.pattern_matched) for record in pattern_records),
             len(pattern_records),
         ),
+        "cypher_cases_evaluated": len(cypher_records),
+        "cypher_pass_rate": ratio(
+            sum(bool(record.cypher_passed) for record in cypher_records),
+            len(cypher_records),
+        ),
+        "query_execution_cases_evaluated": len(query_execution_records),
+        "query_execution_success_rate": ratio(
+            sum(
+                bool(record.query_execution_succeeded)
+                for record in query_execution_records
+            ),
+            len(query_execution_records),
+        ),
         "safety_cases_evaluated": len(safety_records),
         "safety_rejection_rate": ratio(
             sum(record.outcome_matched for record in safety_records),
@@ -402,6 +481,11 @@ def summarize(records: Sequence[EvaluationRecord]) -> Dict[str, Any]:
             sum(bool(record.response.get("linked_entities")) for record in unknown_entity_records),
             len(unknown_entity_records),
         ),
+        "empty_result_cases_evaluated": len(empty_result_records),
+        "empty_result_honesty_rate": ratio(
+            sum(bool(record.empty_result_honest) for record in empty_result_records),
+            len(empty_result_records),
+        ),
         "latency_p50_ms": _percentile(latencies, 0.50),
         "latency_p95_ms": _percentile(latencies, 0.95),
         "failures": [
@@ -414,6 +498,38 @@ def summarize(records: Sequence[EvaluationRecord]) -> Dict[str, Any]:
             for record in records
             if not record.outcome_matched
         ],
+    }
+
+
+def assess_acceptance(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """按文档阈值评估验收结果；统计指标不要求固定集 100%。"""
+    checks = {}
+    failed_metrics = []
+    not_evaluated_metrics = []
+    for metric, threshold in ACCEPTANCE_THRESHOLDS.items():
+        value = summary.get(metric)
+        if value is None:
+            passed = None
+            not_evaluated_metrics.append(metric)
+        else:
+            passed = float(value) >= threshold
+            if not passed:
+                failed_metrics.append(metric)
+        checks[metric] = {
+            "value": value,
+            "threshold": threshold,
+            "passed": passed,
+        }
+
+    evaluated_count = sum(
+        check["passed"] is not None
+        for check in checks.values()
+    )
+    return {
+        "passed": evaluated_count > 0 and not failed_metrics,
+        "checks": checks,
+        "failed_metrics": failed_metrics,
+        "not_evaluated_metrics": not_evaluated_metrics,
     }
 
 
@@ -590,6 +706,7 @@ def main() -> int:
     summary = summarize(records)
     summary["evaluation_context"] = _evaluation_context(engine)
     summary["retrieval"] = summarize_retrieval(retrieval_records)
+    summary["acceptance"] = assess_acceptance(summary)
     payload = {
         "summary": summary,
         "records": [record.model_dump(mode="json") for record in records],
@@ -605,7 +722,7 @@ def main() -> int:
             encoding="utf-8",
         )
         print(f"详细结果: {args.output}")
-    return 0 if summary.get("outcome_accuracy") == 1.0 else 1
+    return 0 if summary["acceptance"]["passed"] else 1
 
 
 if __name__ == "__main__":
