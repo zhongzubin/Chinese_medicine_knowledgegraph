@@ -1,6 +1,6 @@
 # 知识图谱问答交接说明
 
-> 交接基线：`6c0b07c`（120 条评测工作区完成后更新）
+> 交接基线：`c09a6e1`（已推送到 `origin/main`）
 >
 > 交接日期：2026-10-28
 >
@@ -182,7 +182,19 @@ uv run python -m pytest tests/ -v
 - 没有面向最终用户的多用户认证、监控和正式部署收尾。
 - 不实现内容生成第三路由。
 
-## 11. 下一步
+## 11. 当前发布与交接状态
+
+- 120 条评测代码与数据提交：`793f7d2`。
+- 评测报告与文档提交：`c09a6e1`。
+- 2026-10-28 已推送 `034f2fe..c09a6e1` 到 `origin/main`，当前工作区干净。
+- 可提交的评测入口为
+  [retrieval-evaluation-2026-10-28.md](retrieval-evaluation-2026-10-28.md)。
+- 完整逐题 JSON 保存在本地
+  `output/graph_qa/evaluation-120-2026-10-28.json`；`output/` 被 Git 忽略，
+  不应依赖该文件恢复结论。
+- 本轮已结束，下一项业务代码任务尚未开始，也没有未提交的实验改动。
+
+## 12. 下一步
 
 优先修复评测暴露的检索与证据边界，再继续扩功能：
 
@@ -192,7 +204,33 @@ uv run python -m pytest tests/ -v
 4. 修复后重复 120 条评测，再评估阈值、实体描述和 reranker。
 5. 补充 5 轮追问评测，再进入 API 超时、监控和部署收尾。
 
-## 12. 新对话建议开场
+### 12.1 下一任务准备说明
+
+下一任务按高风险处理，因为会改变核心实体链接和 `grounded` 语义。开始编码前仍需向用户提交方案并等待明确确认。
+
+建议范围：
+
+- `graph_qa/entity_linker.py`：处理完整输入中的短实体截获和通用词候选。
+- `graph_qa/workflow.py`：检查预匹配与目标实体绑定，收紧证据是否支持本轮实体的判断。
+- `graph_qa/models.py` 与接口契约：仅在新状态无法用现有字段表达时修改；优先保持响应结构兼容。
+- `tests/test_entity_linker.py`、`tests/test_graph_qa_workflow.py` 和评测测试：增加对应回归。
+- `evaluation/qa_cases.jsonl`：仅在发现数据缺口时补充，维持 120 条现有基线可比性。
+
+验收重点：
+
+- “空青果”不得被“青果”直接链接。
+- “药材、方剂、功效、治疗”等通用意图词不得成为目标实体候选。
+- 证据与目标实体不相关时不得返回 `grounded=true`。
+- 原有 exact、alias、同名异标签、fuzzy 和 semantic 正常路径不回归。
+- 全量 pytest 通过；真实 120 条评测重跑并与本报告逐项比较。
+- 安全拦截率保持 100%，不新增内容生成或多 worker 能力。
+
+回滚方式：
+
+- 下一任务使用独立分支 `codex/graph-qa-retrieval-boundaries`。
+- 代码与评测数据按逻辑分开提交；出现不可接受的召回回归时回退到已验证基线 `c09a6e1`。
+
+## 13. 新对话建议开场
 
 ```text
 继续开发 D:\code\github-clong\Chinese_medicine_knowledgegraph。
