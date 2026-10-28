@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from graph_qa.api import create_app
 from graph_qa.api_security import APIConfigurationError, APISettings
 from graph_qa.models import (
+    ConversationTurn,
     ErrorCode,
     Evidence,
     GraphQAResponse,
@@ -37,16 +38,30 @@ class FakeEngine:
         self.error = error
         self.questions = []
         self.request_ids = []
+        self.histories = []
+        self.session_ids = []
         self.repository = FakeRepository()
 
-    def answer(self, question, request_id=None):
+    def answer(
+        self,
+        question,
+        request_id=None,
+        conversation_history=None,
+        session_id=None,
+    ):
         self.questions.append(question)
         self.request_ids.append(request_id)
+        self.histories.append(list(conversation_history or []))
+        self.session_ids.append(session_id)
         if self.error is not None:
             raise self.error
         response = self.response or make_response()
         return response.model_copy(
-            update={"question": question, "request_id": request_id}
+            update={
+                "question": question,
+                "request_id": request_id,
+                "session_id": session_id,
+            }
         )
 
 
@@ -107,6 +122,47 @@ class FakeLimitStore:
         self.closed = True
 
 
+class FakeSessionStore:
+    def __init__(self):
+        self.sessions = {}
+        self.locks = set()
+        self.deleted = []
+        self.ping_result = True
+        self.load_error = None
+        self.save_error = None
+        self.closed = False
+
+    def ping(self):
+        return self.ping_result
+
+    def load(self, client_id, session_id):
+        if self.load_error is not None:
+            raise self.load_error
+        return self.sessions.get((client_id, session_id))
+
+    def save(self, client_id, session_id, turns):
+        if self.save_error is not None:
+            raise self.save_error
+        self.sessions[(client_id, session_id)] = list(turns)[-5:]
+
+    def delete(self, client_id, session_id):
+        self.sessions.pop((client_id, session_id), None)
+        self.deleted.append((client_id, session_id))
+
+    def acquire_lock(self, client_id, session_id, lock_token):
+        key = (client_id, session_id)
+        if key in self.locks:
+            return False
+        self.locks.add(key)
+        return True
+
+    def release_lock(self, client_id, session_id, lock_token):
+        self.locks.discard((client_id, session_id))
+
+    def close(self):
+        self.closed = True
+
+
 def make_response() -> GraphQAResponse:
     return GraphQAResponse(
         request_id="placeholder",
@@ -150,34 +206,39 @@ def make_settings(**overrides) -> APISettings:
     return APISettings(**values)
 
 
-def make_app(engine, store, settings=None):
+def make_app(engine, store, settings=None, session_store=None):
     active_settings = settings or make_settings()
+    active_session_store = session_store or FakeSessionStore()
     return create_app(
         settings=active_settings,
         engine_factory=lambda _settings: engine,
         limit_store_factory=lambda _settings: store,
+        session_store_factory=lambda _settings: active_session_store,
     )
 
 
 def test_health_reports_ready_without_external_dependencies():
     engine = FakeEngine()
     store = FakeLimitStore()
+    session_store = FakeSessionStore()
 
-    with TestClient(make_app(engine, store)) as client:
+    with TestClient(make_app(engine, store, session_store=session_store)) as client:
         response = client.get("/health")
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "schema_version": "1.0"}
     assert store.closed is True
+    assert session_store.closed is True
     assert engine.repository.closed is True
 
 
 def test_health_reports_redis_failure_after_startup():
     engine = FakeEngine()
     store = FakeLimitStore()
+    session_store = FakeSessionStore()
 
-    with TestClient(make_app(engine, store)) as client:
-        store.ping_result = False
+    with TestClient(make_app(engine, store, session_store=session_store)) as client:
+        session_store.ping_result = False
         response = client.get("/health")
 
     assert response.status_code == 503
@@ -190,13 +251,15 @@ def test_health_reports_redis_failure_after_startup():
 def test_startup_fails_when_redis_is_unavailable():
     engine = FakeEngine()
     store = FakeLimitStore()
+    session_store = FakeSessionStore()
     store.ping_result = False
 
     with pytest.raises(APIConfigurationError, match="Redis 连接不可用"):
-        with TestClient(make_app(engine, store)):
+        with TestClient(make_app(engine, store, session_store=session_store)):
             pass
 
     assert store.closed is True
+    assert session_store.closed is True
     assert engine.repository.closed is False
 
 
@@ -216,8 +279,10 @@ def test_qa_returns_contract_response_and_releases_lease():
     assert payload["schema_version"] == "1.0"
     assert payload["grounded"] is True
     assert payload["evidence"][0]["relationship"] == "HAS_EFFECT"
+    assert payload["session_id"]
     assert engine.questions == ["麻黄有什么功效？"]
     assert engine.request_ids == [payload["request_id"]]
+    assert engine.histories == [[]]
     assert store.rate_clients == ["test-client"]
     assert store.inflight == set()
     assert store.released_request_ids == [payload["request_id"]]
@@ -365,3 +430,152 @@ def test_domain_error_uses_http_status_mapping():
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == ErrorCode.UNSAFE_REQUEST.value
+
+
+def test_existing_session_loads_five_turn_history():
+    engine = FakeEngine()
+    store = FakeLimitStore()
+    session_store = FakeSessionStore()
+    session_id = "11111111-1111-4111-8111-111111111111"
+    previous = ConversationTurn(
+        question="麻黄有什么功效？",
+        answer="麻黄具有发汗功效。",
+        linked_entities=make_response().linked_entities,
+        grounded=True,
+    )
+    session_store.sessions[("test-client", session_id)] = [previous]
+
+    with TestClient(
+        make_app(engine, store, session_store=session_store)
+    ) as client:
+        response = client.post(
+            "/api/v1/qa",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={
+                "question": "它有什么禁忌？",
+                "session_id": session_id,
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["session_id"] == session_id
+    assert engine.histories == [[previous]]
+    assert len(session_store.sessions[("test-client", session_id)]) == 2
+    assert session_store.locks == set()
+
+
+def test_unknown_or_other_client_session_is_not_found():
+    engine = FakeEngine()
+    store = FakeLimitStore()
+    session_store = FakeSessionStore()
+    session_id = "22222222-2222-4222-8222-222222222222"
+    session_store.sessions[("other-client", session_id)] = [
+        ConversationTurn(
+            question="麻黄有什么功效？",
+            answer="已回答。",
+            grounded=True,
+        )
+    ]
+
+    with TestClient(
+        make_app(engine, store, session_store=session_store)
+    ) as client:
+        response = client.post(
+            "/api/v1/qa",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={
+                "question": "它有什么禁忌？",
+                "session_id": session_id,
+            },
+        )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == ErrorCode.SESSION_NOT_FOUND.value
+    assert engine.questions == []
+
+
+def test_busy_session_returns_conflict_without_calling_engine():
+    engine = FakeEngine()
+    store = FakeLimitStore()
+    session_store = FakeSessionStore()
+    session_id = "33333333-3333-4333-8333-333333333333"
+    session_store.sessions[("test-client", session_id)] = []
+    session_store.locks.add(("test-client", session_id))
+
+    with TestClient(
+        make_app(engine, store, session_store=session_store)
+    ) as client:
+        response = client.post(
+            "/api/v1/qa",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={
+                "question": "它有什么禁忌？",
+                "session_id": session_id,
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == ErrorCode.SESSION_BUSY.value
+    assert engine.questions == []
+
+
+def test_session_delete_is_scoped_to_client():
+    engine = FakeEngine()
+    store = FakeLimitStore()
+    session_store = FakeSessionStore()
+    session_id = "44444444-4444-4444-8444-444444444444"
+    session_store.sessions[("test-client", session_id)] = []
+
+    with TestClient(
+        make_app(engine, store, session_store=session_store)
+    ) as client:
+        response = client.delete(
+            f"/api/v1/sessions/{session_id}",
+            headers={"X-API-Key": TEST_API_KEY},
+        )
+
+    assert response.status_code == 204
+    assert ("test-client", session_id) not in session_store.sessions
+
+
+def test_busy_session_cannot_be_deleted():
+    engine = FakeEngine()
+    store = FakeLimitStore()
+    session_store = FakeSessionStore()
+    session_id = "55555555-5555-4555-8555-555555555555"
+    session_store.sessions[("test-client", session_id)] = []
+    session_store.locks.add(("test-client", session_id))
+
+    with TestClient(
+        make_app(engine, store, session_store=session_store)
+    ) as client:
+        response = client.delete(
+            f"/api/v1/sessions/{session_id}",
+            headers={"X-API-Key": TEST_API_KEY},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == ErrorCode.SESSION_BUSY.value
+    assert ("test-client", session_id) in session_store.sessions
+
+
+def test_stream_endpoint_returns_sse_and_persists_completed_turn():
+    engine = FakeEngine()
+    store = FakeLimitStore()
+    session_store = FakeSessionStore()
+
+    with TestClient(
+        make_app(engine, store, session_store=session_store)
+    ) as client:
+        response = client.post(
+            "/api/v1/qa/stream",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={"question": "麻黄有什么功效？"},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: stage" in response.text
+    assert "event: answer_delta" in response.text
+    assert "event: done" in response.text
+    assert len(session_store.sessions) == 1

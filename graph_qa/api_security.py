@@ -80,6 +80,9 @@ class APISettings:
     concurrency_lease_seconds: int = 60
     max_results: int = 50
     database: Optional[str] = None
+    session_ttl_seconds: int = 86400
+    session_max_turns: int = 5
+    session_lock_seconds: int = 180
 
     def __post_init__(self) -> None:
         if not self.redis_url:
@@ -98,6 +101,12 @@ class APISettings:
             raise APIConfigurationError("并发租约时间必须大于等于 1 秒")
         if self.max_results < 1:
             raise APIConfigurationError("最大查询结果数必须大于等于 1")
+        if self.session_ttl_seconds < 1:
+            raise APIConfigurationError("会话 TTL 必须大于等于 1 秒")
+        if self.session_max_turns < 1:
+            raise APIConfigurationError("会话历史轮数必须大于等于 1")
+        if self.session_lock_seconds < 1:
+            raise APIConfigurationError("会话锁时间必须大于等于 1 秒")
 
         normalized_keys: Dict[str, str] = {}
         for client_id, api_key in self.api_keys.items():
@@ -143,6 +152,15 @@ class APISettings:
             ),
             max_results=_read_positive_int("GRAPH_QA_MAX_RESULTS", 50),
             database=(os.getenv("GRAPH_QA_DATABASE") or "").strip() or None,
+            session_ttl_seconds=_read_positive_int(
+                "GRAPH_QA_SESSION_TTL_SECONDS",
+                86400,
+            ),
+            session_max_turns=_read_positive_int("GRAPH_QA_SESSION_MAX_TURNS", 5),
+            session_lock_seconds=_read_positive_int(
+                "GRAPH_QA_SESSION_LOCK_SECONDS",
+                180,
+            ),
         )
 
 

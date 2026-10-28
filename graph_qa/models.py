@@ -2,13 +2,15 @@
 """知识图谱问答的数据模型和稳定性约定。"""
 
 import uuid
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 EntityLabel = Literal["Herb", "Formula", "Disease", "Symptom", "Effect", "Source"]
-MatchType = Literal["name", "alias", "fuzzy"]
+MatchType = Literal["name", "alias", "fuzzy", "semantic"]
 
 MEDICAL_DISCLAIMER = "以上内容仅供中医药知识参考，不能替代专业医疗诊断和治疗。"
 
@@ -20,6 +22,9 @@ class ErrorCode(str, Enum):
     RATE_LIMITED = "RATE_LIMITED"
     SERVICE_BUSY = "SERVICE_BUSY"
     RATE_LIMIT_UNAVAILABLE = "RATE_LIMIT_UNAVAILABLE"
+    SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
+    SESSION_BUSY = "SESSION_BUSY"
+    SESSION_UNAVAILABLE = "SESSION_UNAVAILABLE"
     CONFIG_ERROR = "CONFIG_ERROR"
     MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
     MODEL_OUTPUT_INVALID = "MODEL_OUTPUT_INVALID"
@@ -45,6 +50,10 @@ class GraphQARequest(StrictModel):
         if not value:
             raise ValueError("问题不能为空")
         return value
+
+
+class APIQARequest(GraphQARequest):
+    session_id: Optional[UUID] = None
 
 
 class IntentResult(StrictModel):
@@ -84,6 +93,28 @@ class LinkedEntity(StrictModel):
 class UsedEntityRef(StrictModel):
     label: EntityLabel
     name: str = Field(min_length=1, max_length=100)
+
+
+class ConversationTurn(StrictModel):
+    question: str = Field(min_length=1, max_length=500)
+    answer: str = Field(min_length=1, max_length=10000)
+    linked_entities: List[LinkedEntity] = Field(default_factory=list)
+    grounded: bool
+    created_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+
+
+class RewriteResult(StrictModel):
+    standalone_question: str = Field(min_length=1, max_length=500)
+
+    @field_validator("standalone_question")
+    @classmethod
+    def strip_standalone_question(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("改写后的问题不能为空")
+        return value
 
 
 def _validate_parameter_value(value: Any) -> None:
@@ -157,6 +188,20 @@ class GraphQAResponse(StrictModel):
     evidence: List[Evidence] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     error: Optional[ErrorInfo] = None
+    session_id: Optional[str] = None
+    rewritten_question: Optional[str] = None
+
+
+class GraphQAStreamEvent(StrictModel):
+    event: Literal[
+        "stage",
+        "evidence",
+        "answer_delta",
+        "warning",
+        "error",
+        "done",
+    ]
+    data: Dict[str, Any] = Field(default_factory=dict)
 
 
 def append_disclaimer(answer: str) -> str:

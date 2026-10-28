@@ -8,7 +8,9 @@ import pytest
 import redis
 
 from graph_qa.api_security import APISettings
+from graph_qa.models import ConversationTurn
 from graph_qa.redis_limits import RedisLimitStore
+from graph_qa.session_store import RedisConversationStore
 
 REDIS_TEST_URL = os.getenv("GRAPH_QA_REDIS_TEST_URL")
 
@@ -77,6 +79,45 @@ def test_concurrency_leases_are_shared_between_store_instances():
         assert second.acquire_concurrency("request-3").allowed is True
     finally:
         client.delete(f"{prefix}:inflight")
+        first.close()
+        second.close()
+        client.close()
+
+
+def test_conversation_history_is_shared_trimmed_and_locked():
+    prefix = f"graph_qa_test_{uuid.uuid4().hex}"
+    settings = make_settings(prefix, session_max_turns=2)
+    first = RedisConversationStore(settings)
+    second = RedisConversationStore(settings)
+    client = redis.Redis.from_url(REDIS_TEST_URL, decode_responses=True)
+    session_id = str(uuid.uuid4())
+    turns = [
+        ConversationTurn(
+            question=f"问题 {index}",
+            answer=f"回答 {index}",
+            grounded=False,
+        )
+        for index in range(3)
+    ]
+    try:
+        assert first.acquire_lock("client-a", session_id, "lock-1") is True
+        assert second.acquire_lock("client-a", session_id, "lock-2") is False
+        first.save("client-a", session_id, turns)
+
+        loaded = second.load("client-a", session_id)
+
+        assert [item.question for item in loaded] == ["问题 1", "问题 2"]
+        assert client.ttl(f"{prefix}:session:client-a:{session_id}") > 0
+
+        first.release_lock("client-a", session_id, "lock-1")
+        assert second.acquire_lock("client-a", session_id, "lock-2") is True
+        second.delete("client-a", session_id)
+        assert second.load("client-a", session_id) is None
+    finally:
+        client.delete(
+            f"{prefix}:session:client-a:{session_id}",
+            f"{prefix}:session-lock:client-a:{session_id}",
+        )
         first.close()
         second.close()
         client.close()

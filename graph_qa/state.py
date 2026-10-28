@@ -6,6 +6,7 @@ from typing import Annotated, List, Optional, TypedDict
 
 from graph_qa.models import (
     CypherPlan,
+    ConversationTurn,
     EntityCandidate,
     Evidence,
     IntentResult,
@@ -18,6 +19,9 @@ class AgentState(TypedDict, total=False):
     request_id: str
     question: str
     normalized_question: str
+    rewritten_question: Optional[str]
+    session_id: Optional[str]
+    conversation_history: List[ConversationTurn]
 
     intent: Optional[IntentResult]
     prelinked_entities: List[LinkedEntity]

@@ -2,7 +2,7 @@
 """大模型适配器和结构化输出解析。"""
 
 import json
-from typing import Any, List, Protocol, Sequence
+from typing import Any, Callable, List, Protocol, Sequence
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
@@ -10,12 +10,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from common.config import Config
 from graph_qa.models import (
+    ConversationTurn,
     CypherPlan,
     EntityCandidate,
     ErrorCode,
     Evidence,
     IntentResult,
     LinkedEntity,
+    RewriteResult,
 )
 from graph_qa.prompts import (
     SAFETY_SYSTEM_PROMPT,
@@ -24,6 +26,7 @@ from graph_qa.prompts import (
     entity_extraction_prompt,
     graph_answer_prompt,
     intent_prompt,
+    rewrite_question_prompt,
 )
 from graph_qa.schema import GraphSchema
 
@@ -38,6 +41,13 @@ class ReasonerError(RuntimeError):
 
 
 class QAReasoner(Protocol):
+    def rewrite_question(
+        self,
+        question: str,
+        history: Sequence[ConversationTurn],
+    ) -> RewriteResult:
+        ...
+
     def classify_intent(self, question: str) -> IntentResult:
         ...
 
@@ -56,12 +66,29 @@ class QAReasoner(Protocol):
     def direct_answer(self, question: str) -> str:
         ...
 
+    def stream_direct_answer(
+        self,
+        question: str,
+        on_token: Callable[[str], None],
+    ) -> str:
+        ...
+
     def answer_from_graph(
         self,
         question: str,
         linked_entities: Sequence[LinkedEntity],
         rows: Sequence[dict],
         evidence: Sequence[Evidence],
+    ) -> str:
+        ...
+
+    def stream_answer_from_graph(
+        self,
+        question: str,
+        linked_entities: Sequence[LinkedEntity],
+        rows: Sequence[dict],
+        evidence: Sequence[Evidence],
+        on_token: Callable[[str], None],
     ) -> str:
         ...
 
@@ -138,6 +165,17 @@ class LangChainQAReasoner:
         result = self._invoke_json(intent_prompt(question), IntentResult)
         return result  # type: ignore[return-value]
 
+    def rewrite_question(
+        self,
+        question: str,
+        history: Sequence[ConversationTurn],
+    ) -> RewriteResult:
+        result = self._invoke_json(
+            rewrite_question_prompt(question, history),
+            RewriteResult,
+        )
+        return result  # type: ignore[return-value]
+
     def extract_entities(self, question: str) -> List[EntityCandidate]:
         result = self._invoke_json(entity_extraction_prompt(question), _EntityOutput)
         return result.candidates  # type: ignore[attr-defined]
@@ -180,8 +218,43 @@ class LangChainQAReasoner:
         except Exception as exc:
             raise ReasonerError("模型调用失败", ErrorCode.MODEL_UNAVAILABLE) from exc
 
+    def _stream_text(
+        self,
+        prompt: str,
+        on_token: Callable[[str], None],
+    ) -> str:
+        parts = []
+        try:
+            for chunk in self.llm.stream(
+                [
+                    SystemMessage(content=SAFETY_SYSTEM_PROMPT),
+                    HumanMessage(content=prompt),
+                ]
+            ):
+                text = _message_text(chunk)
+                if text:
+                    parts.append(text)
+                    on_token(text)
+            if not parts:
+                raise ReasonerError(
+                    "模型返回空答案",
+                    ErrorCode.MODEL_OUTPUT_INVALID,
+                )
+            return "".join(parts)
+        except ReasonerError:
+            raise
+        except Exception as exc:
+            raise ReasonerError("模型调用失败", ErrorCode.MODEL_UNAVAILABLE) from exc
+
     def direct_answer(self, question: str) -> str:
         return self._invoke_text(direct_answer_prompt(question))
+
+    def stream_direct_answer(
+        self,
+        question: str,
+        on_token: Callable[[str], None],
+    ) -> str:
+        return self._stream_text(direct_answer_prompt(question), on_token)
 
     def answer_from_graph(
         self,
@@ -200,4 +273,25 @@ class LangChainQAReasoner:
                 rows,
                 evidence_rows,
             )
+        )
+
+    def stream_answer_from_graph(
+        self,
+        question: str,
+        linked_entities: Sequence[LinkedEntity],
+        rows: Sequence[dict],
+        evidence: Sequence[Evidence],
+        on_token: Callable[[str], None],
+    ) -> str:
+        evidence_rows: List[dict] = [
+            item.model_dump(mode="json") for item in evidence
+        ]
+        return self._stream_text(
+            graph_answer_prompt(
+                question,
+                linked_entities,
+                rows,
+                evidence_rows,
+            ),
+            on_token,
         )

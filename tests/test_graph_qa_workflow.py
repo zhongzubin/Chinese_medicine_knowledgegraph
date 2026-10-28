@@ -6,6 +6,7 @@ from typing import List, Sequence
 from graph_qa.entity_linker import EntityIndex, EntityRecord
 from graph_qa.llm import ReasonerError
 from graph_qa.models import (
+    ConversationTurn,
     CypherPlan,
     EntityCandidate,
     ErrorCode,
@@ -13,6 +14,7 @@ from graph_qa.models import (
     IntentResult,
     LinkedEntity,
     QueryResult,
+    RewriteResult,
     UsedEntityRef,
 )
 from graph_qa.schema import GraphSchema
@@ -88,15 +90,24 @@ class FakeReasoner:
         plans: Sequence[object] = (),
         direct: str = "直接回答",
         grounded_answer: str = "麻黄具有发汗功效。",
+        rewritten_question: str | None = None,
     ):
         self.intent = intent
         self.candidates = list(candidates)
         self.plans = list(plans)
         self.direct = direct
         self.grounded_answer = grounded_answer
+        self.rewritten_question = rewritten_question
         self.plan_calls = 0
         self.direct_calls = 0
         self.answer_calls = 0
+        self.rewrite_calls = []
+
+    def rewrite_question(self, question, history):
+        self.rewrite_calls.append((question, list(history)))
+        return RewriteResult(
+            standalone_question=self.rewritten_question or question
+        )
 
     def classify_intent(self, question: str) -> IntentResult:
         return self.intent
@@ -121,6 +132,14 @@ class FakeReasoner:
         self.direct_calls += 1
         return self.direct
 
+    def stream_direct_answer(self, question, on_token):
+        self.direct_calls += 1
+        chunks = [self.direct[:3], self.direct[3:]]
+        for chunk in chunks:
+            if chunk:
+                on_token(chunk)
+        return "".join(chunks)
+
     def answer_from_graph(
         self,
         question: str,
@@ -130,6 +149,21 @@ class FakeReasoner:
     ) -> str:
         self.answer_calls += 1
         return self.grounded_answer
+
+    def stream_answer_from_graph(
+        self,
+        question,
+        linked_entities,
+        rows,
+        evidence,
+        on_token,
+    ):
+        self.answer_calls += 1
+        chunks = [self.grounded_answer[:4], self.grounded_answer[4:]]
+        for chunk in chunks:
+            if chunk:
+                on_token(chunk)
+        return "".join(chunks)
 
 
 class FakeRepository:
@@ -203,6 +237,85 @@ def test_workflow_returns_grounded_answer_query_and_evidence():
     assert "不能替代专业医疗诊断和治疗" in response.answer
     assert repository.explain_calls == 1
     assert repository.execute_calls == 1
+
+
+def test_conversation_history_rewrites_pronoun_before_entity_linking():
+    reasoner = FakeReasoner(
+        intent=tcm_intent(),
+        plans=[make_plan()],
+        rewritten_question="麻黄有什么功效？",
+    )
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=FakeRepository(),
+        schema=make_schema(),
+        entity_index=make_index(),
+    )
+    history = [
+        ConversationTurn(
+            question="麻黄是什么？",
+            answer="麻黄是一味中药材。",
+            linked_entities=[
+                LinkedEntity(
+                    label="Herb",
+                    name="麻黄",
+                    matched_text="麻黄",
+                    match_type="name",
+                    score=1.0,
+                )
+            ],
+            grounded=True,
+        )
+    ]
+
+    response = engine.answer(
+        "它有什么功效？",
+        conversation_history=history,
+        session_id="session-1",
+    )
+
+    assert response.rewritten_question == "麻黄有什么功效?"
+    assert response.session_id == "session-1"
+    assert response.grounded is True
+    assert reasoner.rewrite_calls[0][1] == history
+
+
+def test_stream_answer_emits_public_stages_progress_and_answer_deltas():
+    reasoner = FakeReasoner(
+        intent=tcm_intent(),
+        plans=[make_plan()],
+        grounded_answer="麻黄具有发汗功效。",
+    )
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=FakeRepository(),
+        schema=make_schema(),
+        entity_index=make_index(),
+    )
+
+    events = list(engine.stream_answer("麻黄有什么功效？", request_id="stream-1"))
+
+    stage_names = {
+        event.data["stage"]
+        for event in events
+        if event.event == "stage"
+    }
+    answer_text = "".join(
+        event.data["delta"]
+        for event in events
+        if event.event == "answer_delta"
+    )
+    done = next(event for event in events if event.event == "done")
+
+    assert {
+        "normalize",
+        "rewrite_question",
+        "prelink_entities",
+        "validate_cypher",
+        "answer_from_graph",
+    }.issubset(stage_names)
+    assert answer_text == done.data["response"]["answer"]
+    assert done.data["response"]["grounded"] is True
 
 
 def test_non_tcm_question_uses_direct_answer_without_graph_query():
@@ -387,6 +500,16 @@ def test_empty_query_result_is_reported_without_fabricating_answer():
 def test_answer_model_failure_uses_evidence_fallback():
     class FailingAnswerReasoner(FakeReasoner):
         def answer_from_graph(self, question, linked_entities, rows, evidence):
+            raise RuntimeError("model down")
+
+        def stream_answer_from_graph(
+            self,
+            question,
+            linked_entities,
+            rows,
+            evidence,
+            on_token,
+        ):
             raise RuntimeError("model down")
 
     reasoner = FailingAnswerReasoner(
