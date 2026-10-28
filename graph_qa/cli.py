@@ -11,6 +11,7 @@ from neo4j import GraphDatabase
 
 from common.config import Config
 from graph_qa.cypher_guard import CypherGuard
+from graph_qa.entity_linker import EntityIndex
 from graph_qa.llm import LangChainQAReasoner
 from graph_qa.models import ErrorCode, GraphQAResponse
 from graph_qa.neo4j_repository import Neo4jRepository, RepositoryError
@@ -50,12 +51,66 @@ def _read_positive_int(name: str, default: int) -> int:
     return value
 
 
+def _read_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise CLIConfigError(f"{name} 必须是 true 或 false")
+
+
+def _read_probability(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise CLIConfigError(f"{name} 必须是数字") from exc
+    if not 0 <= value <= 1:
+        raise CLIConfigError(f"{name} 必须在 0 到 1 之间")
+    return value
+
+
+def _build_entity_index(repository: Neo4jRepository):
+    entity_index = repository.load_entity_index()
+    if not _read_bool("GRAPH_QA_VECTOR_ENABLED", False):
+        return entity_index
+
+    from graph_qa.semantic_index import (
+        SemanticEntityIndex,
+        SemanticIndexError,
+        SentenceTransformerEncoder,
+    )
+
+    model_name = (
+        os.getenv("GRAPH_QA_EMBEDDING_MODEL")
+        or "BAAI/bge-small-zh-v1.5"
+    ).strip()
+    top_k = _read_positive_int("GRAPH_QA_VECTOR_TOP_K", 3)
+    threshold = _read_probability("GRAPH_QA_VECTOR_THRESHOLD", 0.65)
+    try:
+        semantic_index = SemanticEntityIndex(
+            entity_index.entries,
+            SentenceTransformerEncoder(model_name),
+            top_k=top_k,
+            threshold=threshold,
+        )
+    except SemanticIndexError as exc:
+        raise CLIConfigError(f"实体向量索引不可用: {exc}") from exc
+    return EntityIndex(entity_index.entries, semantic_index=semantic_index)
+
+
 def build_engine_from_environment(
     database: Optional[str] = None,
     max_results: int = 50,
     metadata_path: Path = DEFAULT_METADATA_PATH,
 ) -> GraphQAEngine:
-    """构建真实模型与 Neo4j 依赖；该函数仅供 CLI 和真实评测使用。"""
+    """构建真实模型、Neo4j 和可选 FAISS 依赖。"""
     config = Config()
     missing = [
         name
@@ -97,10 +152,12 @@ def build_engine_from_environment(
         max_results=max_results,
     )
     try:
+        entity_index = _build_entity_index(repository)
         return GraphQAEngine(
             reasoner=reasoner,
             repository=repository,
             schema=schema,
+            entity_index=entity_index,
             max_attempts=query_attempts,
             entity_limit=entity_limit,
         )

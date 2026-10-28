@@ -5,7 +5,16 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import DefaultDict, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import (
+    DefaultDict,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Protocol,
+    Sequence,
+    Tuple,
+)
 
 from graph_qa.models import EntityCandidate, LinkedEntity
 
@@ -44,9 +53,19 @@ class EntityIndexEntry:
             yield alias, "alias"
 
 
+class SemanticMatcher(Protocol):
+    def match(self, text: str) -> List[LinkedEntity]:
+        ...
+
+
 class EntityIndex:
-    def __init__(self, entries: Sequence[EntityIndexEntry]):
+    def __init__(
+        self,
+        entries: Sequence[EntityIndexEntry],
+        semantic_index: Optional[SemanticMatcher] = None,
+    ):
         self.entries = tuple(entries)
+        self.semantic_index = semantic_index
         self._entries_by_label: Dict[str, List[EntityIndexEntry]] = {}
         self._exact_terms: DefaultDict[str, List[Tuple[EntityIndexEntry, str]]] = DefaultDict(list)
 
@@ -58,7 +77,11 @@ class EntityIndex:
                     self._exact_terms[normalized_term].append((entry, match_type))
 
     @classmethod
-    def from_records(cls, records: Iterable[EntityRecord]) -> "EntityIndex":
+    def from_records(
+        cls,
+        records: Iterable[EntityRecord],
+        semantic_index: Optional[SemanticMatcher] = None,
+    ) -> "EntityIndex":
         entries = [
             EntityIndexEntry(
                 label=record.label,
@@ -68,7 +91,7 @@ class EntityIndex:
             for record in records
             if record.name.strip()
         ]
-        return cls(entries)
+        return cls(entries, semantic_index=semantic_index)
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -192,10 +215,22 @@ class EntityIndex:
                 )
             results.extend(exact_matches)
             if len(results) == result_count_before_candidate:
-                results.extend(self._fuzzy_matches(candidate, fuzzy_threshold))
+                semantic_matches = (
+                    self.semantic_index.match(candidate.text)
+                    if self.semantic_index is not None
+                    else []
+                )
+                if semantic_matches:
+                    results.extend(semantic_matches)
+                else:
+                    results.extend(
+                        self._fuzzy_matches(candidate, fuzzy_threshold)
+                    )
 
         if not results:
             results.extend(self._direct_question_matches(normalized_question, None))
+        if not results and self.semantic_index is not None:
+            results.extend(self.semantic_index.match(question))
 
         best_by_key: Dict[Tuple[str, str], LinkedEntity] = {}
         for result in results:
