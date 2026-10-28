@@ -2,7 +2,7 @@
 
 > 文档状态：开发基线 v0.1
 >
-> 所属阶段：M1 问答内核及 M3/M4 扩展
+> 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit
 > 最后更新：2026-10-28
 
 ## 1. 架构目标
@@ -21,13 +21,18 @@
 
 ```mermaid
 flowchart TB
-    User[命令行用户] --> CLI[graph_qa.cli]
-    CLI --> Workflow[LangGraph 问答工作流]
+    User[用户] --> UI[Streamlit]
+    User --> CLI[graph_qa.cli]
+    UI --> API[FastAPI + SSE]
+    API --> Workflow[LangGraph 问答工作流]
+    CLI --> Workflow
 
     Workflow --> LLM[OpenAI 兼容模型接口]
-    Workflow --> Linker[实体链接器]
+    Workflow --> Linker[精确 / fuzzy / FAISS 实体链接]
+    Linker --> Embed[BGE-large + Sentence-Transformers]
     Workflow --> Guard[Cypher 安全校验器]
     Workflow --> Repo[只读 Neo4j 仓储]
+    API --> Redis[(Redis 会话、限流和并发租约)]
 
     Metadata[graph_metadata.json] --> Workflow
     Metadata --> Guard
@@ -42,13 +47,15 @@ flowchart TB
 
 - 大模型：通过现有 `MODEL_API_KEY`、`MODEL_BASE_URL`、`MODEL_NAME` 配置。
 - Neo4j：通过现有 `NEO4J_URI`、`NEO4J_USER`、`NEO4J_PASSWORD` 配置。
+- 嵌入模型：默认使用本地 `models/bge-large-zh-v1.5`。
+- Redis：保存会话、限流窗口和全局并发租约。
 - 图元数据：固定的 `metadata/graph_metadata.json`，运行前校验格式版本和关键字段。
 
-外部依赖必须通过依赖注入或适配器隔离，测试不能访问真实模型或数据库。
+外部依赖必须通过依赖注入或适配器隔离。默认测试不访问真实模型、数据库或 Redis；真实集成测试必须显式启用。
 
 ## 3. 模块划分
 
-计划新增 `graph_qa/` 包：
+`graph_qa/` 当前模块：
 
 | 模块 | 职责 | 明确不负责 |
 | --- | --- | --- |
@@ -59,6 +66,10 @@ flowchart TB
 | `cypher_guard.py` | 单语句、只读、元数据白名单、LIMIT 和参数检查 | 执行查询 |
 | `neo4j_repository.py` | 元数据加载、图实体读取、`EXPLAIN` 和只读查询 | 生成回答 |
 | `workflow.py` | LangGraph 节点、条件路由、重试和失败收口 | 暴露模型隐藏思维 |
+| `semantic_index.py` | BGE-large 编码、FAISS Top-3 和索引缓存 | 决定图数据库事实 |
+| `session_store.py` | 5 轮会话、TTL 和会话锁 | 保存完整执行状态 |
+| `api.py` | FastAPI、SSE、错误映射和资源生命周期 | 复制工作流逻辑 |
+| `streamlit_app.py` | 进度和回答分栏展示 | 业务校验和数据库访问 |
 | `cli.py` | 参数解析、结果序列化和退出码 | 前端交互 |
 | `evaluate.py` | 加载问题集、运行工作流、统计指标 | 修改图数据 |
 
@@ -75,6 +86,9 @@ flowchart TB
 | `request_id` | 单次请求的唯一标识 |
 | `question` | 用户原始问题 |
 | `normalized_question` | 去空白和统一标点后的文本 |
+| `conversation_history` | Redis 加载的最近 5 轮问题、回答和实体 |
+| `rewritten_question` | 用于本轮后续步骤的独立、完整问题 |
+| `session_id` | 当前对话标识，由 API 客户端作用域隔离 |
 | `is_tcm_question` | 是否属于当前图谱范围 |
 | `intent_confidence` | 意图分类置信度，仅用于路由和诊断 |
 | `entity_candidates` | 大模型抽取的实体候选 |
@@ -96,13 +110,14 @@ flowchart TB
 ```mermaid
 flowchart TD
     Start([START]) --> Normalize[规范化问题]
-    Normalize --> Prelink[名称与别名预匹配]
+    Normalize --> Rewrite[结合 5 轮历史改写问题]
+    Rewrite --> Prelink[名称与别名预匹配]
     Prelink -->|命中已知实体| KnownIntent[确认为图谱问题]
     Prelink -->|未命中| Intent[识别中医意图]
     KnownIntent --> Extract[抽取实体候选]
     Intent -->|否| Direct[直接回答]
     Intent -->|是| Extract[抽取实体候选]
-    Extract --> Link[链接图谱实体]
+    Extract --> Link[精确 / fuzzy / FAISS 混合链接]
     Link -->|无匹配| Clarify[请求补充具体实体]
     Link -->|有匹配| Plan[生成 Cypher 与参数]
     Plan --> Validate[安全与语法校验]
@@ -110,7 +125,7 @@ flowchart TD
     Validate -->|失败且次数小于 3| Plan
     Validate -->|失败且次数达到 3| SafeFail[安全失败]
     Execute -->|无结果| NoEvidence[说明图谱无依据]
-    Execute -->|有结果| Answer[生成带证据回答]
+    Execute -->|有结果| Answer[流式生成带证据回答]
     Direct --> End([END])
     Clarify --> End
     SafeFail --> End
@@ -155,7 +170,7 @@ flowchart TD
 4. 使用受控的字符串相似度生成补充候选。
 5. 同类候选按分数排序，保留有限数量并标记来源。
 
-第一版使用 Python 标准库可实现的字符串相似度，不下载额外模型。FAISS 不进入第一版。
+M1 使用 Python 标准库实现字符串相似度。当前 M3 扩展增加本地 BGE-large 和 FAISS，但不替代精确匹配和安全校验。
 
 当前扩展在精确匹配和字符串模糊匹配之间加入语义召回：
 
@@ -243,15 +258,17 @@ flowchart TD
 | 查询方式 | Schema 约束 Text2Cypher | 能利用实际关系结构并保留查询证据 | 查询正确率长期无法达标 |
 | 写入权限 | 完全只读 | 防止提示词注入和误删数据 | 不计划放宽 |
 | 重试次数 | 最多 3 次生成 | 控制延迟和模型成本 | 指标证明需要调整 |
-| 多轮记忆 | 不进入 M1 | 先验证单轮可回答性和证据 | M3 完成 M2 后 |
+| 多轮记忆 | M3 使用 Redis 保存最近 5 轮 | 控制持久化范围、隐私和上下文成本 | 需要端用户身份或更长记忆时 |
 | 微调 | 不进入 M1 | 没有基线时无法证明收益 | 存在稳定训练集和基线差距 |
 | 自动发布 | 不进入 MVP | 与问答目标无关且风险高 | 单独产品需求和安全评审 |
 
-## 11. 后续扩展边界
+## 11. 已实现扩展与后续边界
 
 ### M2 API
 
 FastAPI 只调用稳定的问答服务接口，不复制工作流逻辑。接口必须包含请求模型、错误码、超时和健康检查。
+
+当前已实现非流式接口、API Key、Redis 限流、全局并发和错误映射。
 
 ### M3 记忆与流式
 
@@ -262,12 +279,16 @@ FastAPI 只调用稳定的问答服务接口，不复制工作流逻辑。接口
 - 使用 LangGraph `StreamWriter` 和请求级 SSE，不使用全局用户队列。
 - 推送公开的工作流阶段、证据和答案 token，不推送隐藏推理。
 
+当前已实现 Redis 会话、语义改写、本地 BGE-large + FAISS 混合召回和 SSE。
+
 ### M4 前端
 
 Streamlit 客户端调用 SSE 接口，分栏展示公开处理进度、逐 token 回答和图谱证据。界面不使用不受控 HTML，并显示医学免责声明。
 
-### M5 微调与向量检索
+当前已完成浏览器实测。
 
-必须提供训练集、验证集、独立测试集和基线对比。微调目标只针对受限任务，不用于替代图谱证据。
+### M5 微调与部署增强
+
+向量检索已作为 M3 能力实现。后续微调仍必须提供训练集、验证集、独立测试集和基线对比，微调目标只针对受限任务，不用于替代图谱证据。
 
 小红书或其他内容发布属于独立工作流，必须在人工确认、平台合规和内容审核存在后才能实现。

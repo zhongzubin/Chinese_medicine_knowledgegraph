@@ -1,11 +1,11 @@
 # 知识图谱问答数据与接口契约
 
-> 文档状态：开发基线 v0.1
+> 文档状态：当前实现基线 v1.0
 >
-> 所属阶段：M1 问答内核
-> 最后更新：2026-10-27
+> 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit
+> 最后更新：2026-10-28
 
-本文定义第一版内部模块和命令行必须遵守的契约。FastAPI、Streamlit 和持久化会话只使用后续章节中列出的扩展约束，不在 M1 实现。
+本文定义 CLI、内部模块、FastAPI、Redis 会话、SSE 和 Streamlit 客户端必须遵守的当前契约。
 
 ## 1. 配置契约
 
@@ -48,7 +48,7 @@
 - `triple_patterns` 是数组且包含 `subject_label`、`relationship_type`、`object_label`。
 - 每个标签具有 `name` 属性或明确标识属性。
 
-M1 只接受当前支持的六类实体：
+当前只接受以下六类实体：
 
 - `Herb`
 - `Formula`
@@ -75,7 +75,7 @@ uv run python -m graph_qa.cli --question "麻黄有什么功效？"
 --show-query          可选，显示 Cypher；默认在 text 模式隐藏
 ```
 
-CLI 不读取交互式标准输入。后续对话式 UI 通过服务接口接入，避免命令行行为隐式变化。
+CLI 不读取交互式标准输入。Streamlit 通过 FastAPI 服务接口接入，不复制问答工作流。
 
 ### 3.2 JSON 输出
 
@@ -306,7 +306,7 @@ execute_read(cypher, parameters, timeout, max_rows) -> QueryResult
 
 仓储测试使用 fake session。真实 Neo4j 集成测试必须显式启用，服务不可用时跳过并给出原因。
 
-## 7. 后续 API 契约约束
+## 7. API 契约
 
 FastAPI 当前提供以下接口：
 
@@ -324,6 +324,11 @@ session_id: optional uuid
 
 不传 `session_id` 时服务创建新会话，并在 `GraphQAResponse.session_id` 中返回。后续请求可携带该 ID 使用最近 5 轮上下文。会话不存在、已过期或属于其他 API 客户端时统一返回 404。
 
+响应额外包含：
+
+- `session_id`：本轮会话 ID。
+- `rewritten_question`：结合历史改写后的独立问题，便于调试指代。
+
 成功响应和业务错误继续使用 `GraphQAResponse`。推荐 HTTP 状态映射：
 
 | HTTP | 场景 |
@@ -340,7 +345,7 @@ session_id: optional uuid
 | `503` | 配置、模型、限流服务不可用或全局并发已满 |
 | `504` | 图查询超时 |
 
-API 使用 `X-API-Key` 静态凭据。多 worker/多实例共享 Redis 滑动窗口和全局并发租约；Redis 不可用时失败关闭。限流与并发状态不进入 M1 响应字段。
+API 使用 `X-API-Key` 静态凭据。Redis 保存滑动窗口、全局并发租约和会话状态；Redis 不可用时失败关闭。当前本地运行目标为单 worker，多实例协调代码保留但暂不作为本轮部署验收条件。
 
 HTTP 响应不得默认暴露原始提示词、模型隐藏推理和完整数据库异常。输出仍使用本节定义的答案、证据和错误码。
 

@@ -1,6 +1,6 @@
 # 中医知识图谱
 
-一个面向中药与方剂知识的中文知识图谱项目，覆盖网页数据采集、实体关系抽取、Neo4j 图谱导入，以及面向大模型的中文元数据导出。
+一个面向中药与方剂知识的中文知识图谱项目，覆盖网页数据采集、实体关系抽取、Neo4j 图谱导入、可验证问答 API、流式输出和 Streamlit 交互界面。
 
 项目当前支持：
 
@@ -8,6 +8,10 @@
 - 使用规则与大模型相结合的方式抽取实体、属性和关系。
 - 将实体和关系批量导入 Neo4j，支持幂等导入和缺失端点补全。
 - 导出带中文语义描述的图数据库元数据，为 Text2Cypher 等大模型任务提供准确结构上下文。
+- 使用 LangGraph 完成意图识别、5 轮语义改写、实体链接、只读 Cypher 生成、校验、执行和证据回答。
+- 使用本地 BGE-large + FAISS 补充别名和同义表达召回。
+- 提供 CLI、FastAPI SSE 接口和 Streamlit 双栏交互界面。
+- 使用 Redis 保存 5 轮会话，并提供 API Key、限流和全局并发控制。
 
 ## 数据流程
 
@@ -18,7 +22,8 @@ flowchart LR
     C --> D[output/*.jsonl]
     E[crawler/data/extract_*_data.json] --> F[Neo4j 批量导入]
     F --> G[中文元数据 JSON / Markdown]
-    G --> H[大模型生成 Cypher]
+    G --> H[LangGraph 问答工作流]
+    H --> I[FastAPI SSE / Streamlit]
 ```
 
 > 当前 `extract_information` 输出的是 `output/*.jsonl`，`graph_database.import_data` 默认读取的是 `crawler/data/extract_herb_data.json` 和 `crawler/data/extract_formula_data.json`。两种文件结构不同，使用前请确认数据来源。
@@ -73,8 +78,11 @@ LIMIT 25;
 ├── graph_database/
 │   ├── import_data.py         # Neo4j 批量导入
 │   └── export_metadata.py     # 中文图数据库元数据导出
+├── graph_qa/                  # LangGraph 问答、FAISS、FastAPI、Streamlit
+├── evaluation/                # 黄金问题集
 ├── metadata/                  # 已导出的图结构元数据
 ├── tests/                     # pytest 单元测试
+├── compose.redis.yml          # 可选本地 Redis
 ├── demo/                      # LangChain 示例
 ├── pyproject.toml
 └── uv.lock
@@ -88,6 +96,8 @@ LIMIT 25;
 - [uv](https://docs.astral.sh/uv/)
 - 可访问的 Neo4j 数据库
 - OpenAI 兼容大模型接口，用于从主治文本中抽取疾病和症状
+- 本地 `models/bge-large-zh-v1.5` 嵌入模型
+- Redis，用于 API 会话和限流
 
 安装项目依赖：
 
@@ -112,6 +122,14 @@ NEO4J_PASSWORD=your_neo4j_password
 ```
 
 `.env` 已被 `.gitignore` 排除，请勿提交真实密钥。
+
+完整问答配置见 [.env.example](.env.example)。本地嵌入模型默认使用：
+
+```dotenv
+GRAPH_QA_VECTOR_ENABLED=true
+GRAPH_QA_EMBEDDING_MODEL=models/bge-large-zh-v1.5
+GRAPH_QA_VECTOR_THRESHOLD=0.56
+```
 
 当前抽取模块在导入时会初始化模型客户端。即使使用 `--no-llm` 跳过实际模型调用，也应先配置 `MODEL_*` 环境变量。
 
@@ -367,11 +385,34 @@ uv run python -m pytest tests/test_graph_qa_redis_limits_integration.py -v
 uv run python -m pytest tests/ -v
 ```
 
-测试使用模拟的 Neo4j Driver 和模型结果，不会发起真实数据库或模型请求。运行抽取相关测试时，模块初始化仍会读取 `.env` 中的 `MODEL_*` 配置。
+默认测试使用模拟的 Neo4j Driver、模型和 Redis 状态，不会发起真实外部请求。真实集成测试默认跳过，可按上文分别启用 Neo4j/模型、Redis 和 API 测试。
 
 ## 数据与安全
 
 - `crawler/data/`、`crawler/.cache/` 和 `output/` 属于本地数据，默认不进入 Git。
 - `.env`、虚拟环境、IDE 配置和运行缓存均已忽略。
+- `models/` 和 `.cache/graph_qa/faiss/` 属于本地模型与索引缓存，不进入 Git。
 - 不要向仓库提交 API Key、Neo4j 密码或其他凭据。
 - 导入默认采用增量合并；如需重建空图，请在 Neo4j 中显式创建或清理目标数据库。
+
+## 当前进度与下一步
+
+已完成：
+
+- M1 CLI 问答内核和 30 条黄金集。
+- 单 worker FastAPI、API Key、Redis 会话、SSE 和 Streamlit。
+- 本地 BGE-large、11,043 实体 FAISS 索引和持久化缓存。
+- 5 轮语义改写、同名异标签、只读 Cypher 和证据回答。
+- 全量测试 132 passed；启用真实 BGE+FAISS 后黄金集 30/30。
+
+明确不做：
+
+- 暂不增加内容生成第三路由。
+- 暂不以多 worker 为运行目标。
+
+下一步建议：
+
+1. 扩充黄金集，增加同义词、口语化描述、多轮追问和未知实体负样本，重点评估 FAISS 的 Recall@3 与误召回率。
+2. 对真实查询记录误匹配案例，继续校准 `0.56` 阈值和实体文本编码方式。
+3. 补齐 API 请求级超时、监控指标和部署说明。
+4. 在稳定评估基线后，再决定是否进入 LoRA 或其他模型增强。
