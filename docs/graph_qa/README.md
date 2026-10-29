@@ -113,6 +113,7 @@ M1 实现中遇到的问题、修复过程和遗留限制记录在 [implementati
 - 初始口径见 [实体召回路径评测报告](retrieval-evaluation-2026-10-28.md)。
 - 最新修复结果见 [实体边界与 grounded 修复记录](retrieval-boundary-fix-2026-10-28.md)。
 - 验收门槛与退出码见 [黄金集验收门槛说明](evaluation-acceptance-2026-10-28.md)。
+- 本地演示运行与浏览器验收见 [本地演示版运行与验收](local-demo.md)。
 - 11,043 实体完整 FAISS 首次构建约 10 分钟；缓存命中后启动约 7 秒。
 - Streamlit 已完成真实浏览器测试：回答、进度、证据、追问和清空会话均正常。
 

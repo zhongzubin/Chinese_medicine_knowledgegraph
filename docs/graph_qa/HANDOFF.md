@@ -1,10 +1,10 @@
 # 知识图谱问答交接说明
 
-> 代码基线：`688d868`
+> 代码基线：`18382f6` + 本地演示分支改动
 >
-> 交接日期：2026-10-28
+> 交接日期：2026-10-29
 >
-> 当前分支：`codex/graph-qa-evaluation-gates`
+> 当前分支：`codex/local-demo-readiness`
 
 本文用于新对话快速恢复上下文。开始开发前仍须完整阅读 `AGENTS.md`、`docs/graph_qa/README.md`、`architecture.md`、`contracts.md`、`security-and-evaluation.md` 和 `implementation-challenges.md`。
 
@@ -25,6 +25,7 @@
 | M2 FastAPI | 已完成，当前本地按单 worker 运行 |
 | M3 5 轮会话、FAISS、SSE | 已完成 |
 | M4 Streamlit | 已完成并通过真实浏览器测试 |
+| 本地演示版 | 已完成；一键启动/停止和真实浏览器验收通过 |
 | M5 微调/部署增强 | 未开始 |
 
 明确不在当前范围：
@@ -180,6 +181,7 @@ uv run python -m pytest tests/ -v
 - 长未知词子串、通用词语义候选和无关证据 grounded 已完成首轮修复。
 - 属性级 Effect 候选仍可能被 Disease、Symptom 或通用部位词抢占。
 - 当前没有显式 `no_evidence` 黄金样本，空结果诚实率标记为未评估。
+- 本地演示一次上下文追问完整等待约 70 秒，模型阶段仍有延迟波动。
 - 会话作用域是 API 客户端，不是最终登录用户。
 - 当前本地运行目标为单 worker；每个 worker 会重复加载约 1.3GB BGE 模型。
 - 没有可靠的 API 请求级硬取消，仍依赖模型和 Neo4j 组件超时。
@@ -197,39 +199,46 @@ uv run python -m pytest tests/ -v
 - 完整逐题 JSON 保存在本地
   `output/graph_qa/evaluation-120-retrieval-boundaries-final-2026-10-28.json`；
   `output/` 被 Git 忽略，不应依赖该文件恢复结论。
+- 本地演示启动：`scripts/start_local_demo.ps1`。
+- 本地演示停止：`scripts/stop_local_demo.ps1`。
+- 本地演示完整说明：[local-demo.md](local-demo.md)。
+- 浏览器已验证问题回答、处理阶段、图谱证据、上下文追问和清空会话。
+- 验收截图：`output/playwright/local-demo-2026-10-29.png`。
 
 ## 12. 下一步
 
-检索评测已按文档门槛收口，不再追固定集 100%。下一项进入 API 工程化：
+本地演示版已收口。下一阶段在新对话中开发新的用户可见功能，具体范围等待用户提出。
 
-1. 增加请求级超时和可靠的取消/超时收口。
-2. 补充请求计数、延迟、错误码和模型/图查询耗时指标。
-3. 完善部署说明和健康检查边界。
-4. 5 轮追问评测作为独立评测任务保留。
-5. semantic 阈值、reranker 和 clarification 文本口径暂不继续调优。
+当前优先级：
+
+1. 保持本地演示版可运行、可交互。
+2. 新功能沿用现有 FastAPI + Streamlit 契约，不重写前后端。
+3. 每项新功能同步测试、真实浏览器验收和记录。
+4. 内部试用前再补 API 请求级超时、监控和部署。
+5. 公开上线、多用户认证和更广泛评测继续延后。
 
 ### 12.1 下一任务准备说明
 
-评测验收门槛任务已完成。下一项 API 超时与监控涉及核心请求链路，开始编码前仍需提交方案并确认。
+本地演示任务已完成。新功能开发前需要先明确功能范围、输入输出、数据来源和验收标准；标准及以上任务仍按 AGENTS.md 先提交方案并等待确认。
 
 建议范围：
 
-- `graph_qa/api.py`：请求超时、取消和错误映射。
-- `graph_qa/workflow.py`：仅在需要显式取消信号时修改。
-- 监控适配与健康检查：不记录用户全文、密钥或完整异常。
-- 测试：API 超时、组件超时、错误码和并发释放。
+- 根据新功能需求确定受影响模块。
+- 保持前后端 JSON 和 SSE 契约兼容，除非新功能明确需要升级。
+- 新增功能必须覆盖单元测试和浏览器交互。
+- 不把内部试用/公开上线工程化工作混入当前本地演示功能。
 
 验收重点：
 
-- API 请求超时后不得继续占用并发租约或写入不完整会话。
-- 原有安全、会话隔离、SSE 和 grounded 语义不回归。
-- 全量 pytest 和真实 API 集成测试通过。
+- 本地一键启动和停止仍然可用。
+- 原有问答、证据、会话清空、安全拒绝和 grounded 语义不回归。
+- 全量 pytest 通过；涉及页面时完成真实浏览器验收。
 - 不新增内容生成或多 worker 运行目标。
 
 回滚方式：
 
-- 当前基线为 `688d868`；后续任务另建分支。
-- 出现不可接受回归时回退到 `688d868` 或 `c99cb6d`。
+- 本地演示基线合并后从 `main` 创建新功能分支。
+- 出现不可接受回归时回退到本地演示版本或 `18382f6`。
 
 ## 13. 新对话建议开场
 
@@ -237,7 +246,7 @@ uv run python -m pytest tests/ -v
 继续开发 D:\code\github-clong\Chinese_medicine_knowledgegraph。
 先读取 AGENTS.md 和 docs/graph_qa/HANDOFF.md，再检查 git status。
 当前不实现内容生成，也不以多 worker 为运行目标。
-先读取 docs/graph_qa/evaluation-acceptance-2026-10-28.md。
-下一项实现 API 请求级超时、取消、监控和部署收尾。
+本地演示版已完成，先读取 docs/graph_qa/local-demo.md。
+本轮只开发新的用户可见功能；内部试用和公开上线工程化后续再做。
 开发前按 AGENTS.md 给出方案并等待确认。
 ```

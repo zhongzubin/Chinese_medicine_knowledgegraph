@@ -300,6 +300,21 @@ uv run python -m pytest tests/test_graph_qa_integration.py -v
 
 当前本地演示按单个 Uvicorn worker 运行。Redis 中保留了跨实例限流和会话状态，但本地 BGE-large 会为每个 worker 单独占用约 1.3GB 模型内存，因此在未拆分独立嵌入服务前不建议开启多个 worker。
 
+本地演示版建议使用一键脚本：
+
+```powershell
+pwsh -File scripts\start_local_demo.ps1 -OpenBrowser
+```
+
+停止：
+
+```powershell
+pwsh -File scripts\stop_local_demo.ps1
+```
+
+完整前置条件、验收步骤和故障排查见
+[本地演示版运行与验收](docs/graph_qa/local-demo.md)。
+
 先启动本地 Redis：
 
 ```powershell
@@ -411,6 +426,7 @@ uv run python -m pytest tests/ -v
 
 - M1 CLI 问答内核；黄金集已从 30 条扩充到 120 条。
 - 单 worker FastAPI、API Key、Redis 会话、SSE 和 Streamlit。
+- 本地演示一键启动、停止脚本及真实浏览器前后端验收。
 - 本地 BGE-large、11,043 实体 FAISS 索引和持久化缓存。
 - 5 轮语义改写、同名异标签、只读 Cypher 和证据回答。
 - 全量测试 141 passed、5 skipped；真实 120 条评测 outcome 通过 116 条。
@@ -424,6 +440,6 @@ uv run python -m pytest tests/ -v
 
 下一步建议：
 
-1. 补齐 API 请求级超时、可靠取消、监控指标和部署说明。
-2. 补 5 轮追问评测。
-3. semantic 阈值、reranker 和 clarification 口径作为独立后续任务。
+1. 在本地演示版上开发下一项用户可见功能。
+2. API 请求级超时、监控和公网部署在进入内部试用阶段后完善。
+3. 5 轮追问评测和 semantic 边界作为独立后续任务。
