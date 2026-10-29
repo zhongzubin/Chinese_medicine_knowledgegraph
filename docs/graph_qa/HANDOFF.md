@@ -1,10 +1,10 @@
 # 知识图谱问答交接说明
 
-> 代码基线：`18382f6` + 本地演示分支改动
+> 代码基线：`7be7f3d`
 >
 > 交接日期：2026-10-29
 >
-> 当前分支：`codex/local-demo-readiness`
+> 当前分支：`main`
 
 本文用于新对话快速恢复上下文。开始开发前仍须完整阅读 `AGENTS.md`、`docs/graph_qa/README.md`、`architecture.md`、`contracts.md`、`security-and-evaluation.md` 和 `implementation-challenges.md`。
 
@@ -193,6 +193,7 @@ uv run python -m pytest tests/ -v
 - 初始 120 条评测提交：`793f7d2`、`c09a6e1`。
 - 边界与 grounded 修复提交：`c99cb6d`。
 - 验收门槛提交：`688d868`。
+- 本地演示版提交：`7be7f3d`（已快进合并到 `main`）。
 - 全量 pytest：`141 passed, 5 skipped`。
 - 真实 120 条 outcome：`116/120`；grounded 证据覆盖率：100%。
 - Cypher 通过率：100%；查询执行成功率：100%；`acceptance.passed=true`。
@@ -202,6 +203,7 @@ uv run python -m pytest tests/ -v
 - 本地演示启动：`scripts/start_local_demo.ps1`。
 - 本地演示停止：`scripts/stop_local_demo.ps1`。
 - 本地演示完整说明：[local-demo.md](local-demo.md)。
+- 本地演示一键启动、API/Streamlit 健康检查、浏览器交互和停止脚本均已实测通过。
 - 浏览器已验证问题回答、处理阶段、图谱证据、上下文追问和清空会话。
 - 验收截图：`output/playwright/local-demo-2026-10-29.png`。
 
