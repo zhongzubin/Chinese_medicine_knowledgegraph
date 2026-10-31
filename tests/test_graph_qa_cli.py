@@ -8,6 +8,7 @@ from graph_qa import cli
 from graph_qa.cli import CLIConfigError, parse_args, render_text, run
 from graph_qa.models import (
     AggregateFact,
+    AnswerVerification,
     AttributeFact,
     ErrorCode,
     Evidence,
@@ -146,6 +147,32 @@ def test_render_text_includes_multi_hop_path():
     assert "多跳路径" in output
     assert "HAS_INGREDIENT" in output
     assert "HAS_EFFECT" in output
+
+
+def test_render_text_includes_answer_verification():
+    response = GraphQAResponse(
+        question="麻黄有什么功效？",
+        answer="麻黄具有发汗功效。",
+        grounded=True,
+        verification=AnswerVerification(
+            status="passed",
+            checked_items=3,
+            matched_items=3,
+            evidence_items=2,
+            fact_items=1,
+            aggregate_items=0,
+            path_items=0,
+            missing_sources=1,
+            fallback_used=False,
+            message="已核对 3 项图谱证据，回答包含可追溯事实。",
+        ),
+    )
+
+    output = render_text(response)
+
+    assert "回答校验" in output
+    assert "已通过证据支持校验" in output
+    assert "缺失来源 1 项" in output
 
 
 def test_run_json_output_and_closes_repository():

@@ -82,3 +82,23 @@ def test_parse_sse_lines_accepts_multi_hop_path_event():
 
     assert events[0][0] == "paths"
     assert events[0][1]["items"][0]["intermediate"] == "人参"
+
+
+def test_parse_sse_lines_accepts_answer_audit_event():
+    events = list(
+        parse_sse_lines(
+            iter(
+                [
+                    "event: audit",
+                    (
+                        'data: {"status":"passed","agent":"evidence_audit",'
+                        '"checked_items":3,"missing_sources":1}'
+                    ),
+                    "",
+                ]
+            )
+        )
+    )
+
+    assert events[0][0] == "audit"
+    assert events[0][1]["checked_items"] == 3

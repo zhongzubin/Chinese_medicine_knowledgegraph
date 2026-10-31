@@ -7,6 +7,7 @@ from typing import Annotated, List, Optional, TypedDict
 from graph_qa.models import (
     AggregateFact,
     AggregateQueryPlan,
+    AnswerVerification,
     AttributeFact,
     AttributeQueryPlan,
     CypherPlan,
@@ -55,6 +56,7 @@ class AgentState(TypedDict, total=False):
     facts: List[AttributeFact]
     aggregates: List[AggregateFact]
     paths: List[PathEvidence]
+    verification: Optional[AnswerVerification]
     answer: str
     grounded: bool
     warnings: Annotated[List[str], operator.add]

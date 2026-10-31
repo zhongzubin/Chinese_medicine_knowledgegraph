@@ -2,6 +2,10 @@
 """Graph QA 工作流中的角色 Agent。"""
 
 from graph_qa.agents.base import AgentDescriptor, AgentRegistry
+from graph_qa.agents.evidence_audit import (
+    AuditDecision,
+    EvidenceAuditAgent,
+)
 from graph_qa.agents.roles import (
     AnswerAgent,
     DialogueAgent,
@@ -14,8 +18,10 @@ __all__ = [
     "AgentDescriptor",
     "AgentRegistry",
     "AnswerAgent",
+    "AuditDecision",
     "DialogueAgent",
     "EntityAgent",
+    "EvidenceAuditAgent",
     "IntentAgent",
     "QAAgentTeam",
 ]

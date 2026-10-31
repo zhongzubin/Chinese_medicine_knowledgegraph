@@ -258,6 +258,20 @@ class PathEvidence(StrictModel):
     source: Optional[str] = Field(default=None, max_length=1000)
 
 
+class AnswerVerification(StrictModel):
+    status: Literal["passed", "fallback"]
+    agent: Literal["evidence_audit"] = "evidence_audit"
+    checked_items: int = Field(ge=0)
+    matched_items: int = Field(ge=0)
+    evidence_items: int = Field(ge=0)
+    fact_items: int = Field(ge=0)
+    aggregate_items: int = Field(ge=0)
+    path_items: int = Field(ge=0)
+    missing_sources: int = Field(ge=0)
+    fallback_used: bool
+    message: str = Field(min_length=1, max_length=300)
+
+
 class ErrorInfo(StrictModel):
     code: ErrorCode
     message: str
@@ -276,6 +290,7 @@ class GraphQAResponse(StrictModel):
     facts: List[AttributeFact] = Field(default_factory=list)
     aggregates: List[AggregateFact] = Field(default_factory=list)
     paths: List[PathEvidence] = Field(default_factory=list)
+    verification: Optional[AnswerVerification] = None
     warnings: List[str] = Field(default_factory=list)
     error: Optional[ErrorInfo] = None
     session_id: Optional[str] = None
@@ -289,6 +304,7 @@ class GraphQAStreamEvent(StrictModel):
         "facts",
         "aggregates",
         "paths",
+        "audit",
         "answer_delta",
         "warning",
         "error",

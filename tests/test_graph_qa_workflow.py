@@ -418,6 +418,10 @@ def test_workflow_returns_grounded_answer_query_and_evidence():
     assert "HAS_EFFECT" in response.query.cypher
     assert "$entity_names" in response.query.cypher
     assert response.evidence[0].object == "发汗"
+    assert response.verification is not None
+    assert response.verification.status == "passed"
+    assert response.verification.evidence_items == 1
+    assert response.verification.missing_sources == 1
     assert "不能替代专业医疗诊断和治疗" in response.answer
     assert repository.explain_calls == 1
     assert repository.execute_calls == 1
@@ -468,12 +472,15 @@ def test_stream_answer_emits_attribute_facts_and_verification_stage():
     events = list(engine.stream_answer("麻黄性味是什么？"))
 
     fact_event = next(event for event in events if event.event == "facts")
+    audit_event = next(event for event in events if event.event == "audit")
     stages = {
         event.data["stage"]
         for event in events
         if event.event == "stage"
     }
     assert fact_event.data["items"][0]["attribute_label"] == "性味"
+    assert audit_event.data["status"] == "passed"
+    assert audit_event.data["fact_items"] == 1
     assert "verify_answer" in stages
 
 
@@ -720,6 +727,9 @@ def test_multi_hop_question_returns_paths_and_deterministic_answer():
     assert len(response.paths) == 1
     assert response.paths[0].intermediate == "人参"
     assert response.paths[0].target == "补气"
+    assert response.verification is not None
+    assert response.verification.path_items == 1
+    assert response.verification.status == "passed"
     assert "人参：补气" in response.answer
     assert repository.multi_hop_calls == 1
     assert reasoner.plan_calls == 0
@@ -960,6 +970,7 @@ def test_stream_answer_emits_public_stages_progress_and_answer_deltas():
         if event.event == "answer_delta"
     )
     done = next(event for event in events if event.event == "done")
+    audit = next(event for event in events if event.event == "audit")
 
     assert {
         "normalize",
@@ -970,6 +981,8 @@ def test_stream_answer_emits_public_stages_progress_and_answer_deltas():
     }.issubset(stage_names)
     assert answer_text == done.data["response"]["answer"]
     assert done.data["response"]["grounded"] is True
+    assert done.data["response"]["verification"]["status"] == "passed"
+    assert audit.data["agent"] == "evidence_audit"
 
 
 def test_unsupported_answer_is_replaced_by_evidence_fallback():
@@ -999,6 +1012,8 @@ def test_unsupported_answer_is_replaced_by_evidence_fallback():
     assert "发汗" in update["answer"]
     assert update["grounded"] is True
     assert update["warnings"]
+    assert update["verification"].status == "fallback"
+    assert update["verification"].fallback_used is True
 
 
 def test_answer_formatting_splits_inline_markdown_bullets():
@@ -1043,6 +1058,7 @@ def test_non_tcm_question_uses_direct_answer_without_graph_query():
     assert response.grounded is False
     assert response.query is None
     assert response.linked_entities == []
+    assert response.verification is None
     assert any("未使用知识图谱证据" in warning for warning in response.warnings)
     assert "不能替代专业医疗诊断和治疗" not in response.answer
     assert repository.execute_calls == 0

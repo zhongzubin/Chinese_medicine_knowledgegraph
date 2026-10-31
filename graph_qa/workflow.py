@@ -12,6 +12,11 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
 from graph_qa.agents import QAAgentTeam
+from graph_qa.agents.evidence_audit import (
+    aggregate_answer,
+    context_fallback_answer,
+    evidence_fallback_answer,
+)
 from graph_qa.cypher_guard import CypherGuard, CypherGuardError, detect_unsafe_question
 from graph_qa.entity_linker import EntityIndex
 from graph_qa.llm import QAReasoner, ReasonerError
@@ -233,16 +238,6 @@ def evidence_from_rows(
     return list(evidence_by_key.values())
 
 
-def _evidence_fallback_answer(evidence: Sequence[Evidence]) -> str:
-    lines = ["根据当前图谱中可验证的关系："]
-    for item in evidence[:5]:
-        source = f"（来源：{item.source}）" if item.source else ""
-        lines.append(
-            f"- {item.subject} 通过 {item.relationship} 关联到 {item.object}{source}"
-        )
-    return "\n".join(lines)
-
-
 def _evidence_entity_keys(evidence: Evidence) -> Set[Tuple[str, str]]:
     return {
         (evidence.subject_label, evidence.subject),
@@ -451,43 +446,6 @@ def facts_from_rows(
     return facts
 
 
-def _answer_supported_by_context(
-    answer: str,
-    evidence: Sequence[Evidence],
-    facts: Sequence[AttributeFact],
-    aggregates: Sequence[AggregateFact] = (),
-    paths: Sequence[PathEvidence] = (),
-) -> bool:
-    normalized_answer = normalize_question(answer)
-    candidates: Set[str] = set()
-    for item in evidence:
-        candidates.add(item.object)
-    for item in facts:
-        candidates.add(item.value)
-        candidates.update(
-            part.strip()
-            for part in re.split(r"[\s，,、；;。]+", item.value)
-            if part.strip()
-        )
-    for item in aggregates:
-        candidates.add(str(item.count))
-        candidates.add(item.description)
-    for item in paths:
-        candidates.add(item.intermediate)
-        candidates.add(item.target)
-    return any(
-        len(candidate) >= 2 and candidate in normalized_answer
-        for candidate in candidates
-    )
-
-
-def _aggregate_answer(aggregates: Sequence[AggregateFact]) -> str:
-    lines = ["根据当前图谱统计："]
-    for item in aggregates:
-        lines.append(f"- {item.description}共有 {item.count} 个")
-    return "\n".join(lines)
-
-
 def _multi_hop_answer(
     plan: MultiHopQueryPlan,
     paths: Sequence[PathEvidence],
@@ -525,25 +483,6 @@ def facts_match_used_entities(
         (item.subject_label, item.subject) in used_keys
         for item in facts
     )
-
-
-def _context_fallback_answer(
-    evidence: Sequence[Evidence],
-    facts: Sequence[AttributeFact],
-) -> str:
-    lines = ["根据当前图谱中可验证的信息："]
-    for item in facts[:8]:
-        source = f"（来源：{item.source}）" if item.source else "（未提供出处）"
-        lines.append(
-            f"- {item.subject}的{item.attribute_label}：{item.value}{source}"
-        )
-    for item in evidence[:8]:
-        source = f"（来源：{item.source}）" if item.source else "（未提供出处）"
-        lines.append(
-            f"- {item.subject} 通过 {item.relationship} 关联到 "
-            f"{item.object}{source}"
-        )
-    return "\n".join(lines)
 
 
 def _normalize_answer_formatting(
@@ -2031,7 +1970,7 @@ LIMIT {limit}
                 "stage_events": ["answer_from_graph"],
             }
         if aggregates and not evidence:
-            answer = append_disclaimer(_aggregate_answer(aggregates))
+            answer = append_disclaimer(aggregate_answer(aggregates))
             _emit_answer_delta(answer)
             return {
                 "answer": answer,
@@ -2040,7 +1979,7 @@ LIMIT {limit}
             }
         if facts and not evidence:
             answer = append_disclaimer(
-                _context_fallback_answer([], facts)
+                context_fallback_answer([], facts)
             )
             _emit_answer_delta(answer)
             return {
@@ -2098,10 +2037,10 @@ LIMIT {limit}
                     "warnings": ["回答流式生成中断，内容可能不完整。"],
                     "stage_events": ["answer_from_graph"],
                 }
-            fallback = append_disclaimer(_evidence_fallback_answer(evidence))
+            fallback = append_disclaimer(evidence_fallback_answer(evidence))
             if facts:
                 fallback = append_disclaimer(
-                    _context_fallback_answer(evidence, facts)
+                    context_fallback_answer(evidence, facts)
                 )
             _emit_answer_delta(fallback)
             return {
@@ -2112,35 +2051,22 @@ LIMIT {limit}
             }
 
     def _verify_answer(self, state: AgentState) -> Dict[str, Any]:
-        answer = state.get("answer", "").strip()
-        evidence = state.get("evidence", [])
-        facts = state.get("facts", [])
-        if not answer or not _answer_supported_by_context(
-            answer,
-            evidence,
-            facts,
+        decision = self.agents.evidence_audit.audit(
+            state.get("answer", ""),
+            state.get("evidence", []),
+            state.get("facts", []),
             state.get("aggregates", []),
             state.get("paths", []),
-        ):
-            fallback = append_disclaimer(
-                _aggregate_answer(state.get("aggregates", []))
-                if state.get("aggregates")
-                else _context_fallback_answer(evidence, facts)
-            )
-            return {
-                "answer": fallback,
-                "grounded": True,
-                "warnings": [
-                    "回答模型输出的内容未能完整对应本轮证据，"
-                    "已改为证据化回答。"
-                ],
-                "stage_events": ["verify_answer"],
-            }
-        return {
-            "answer": answer,
+        )
+        update: Dict[str, Any] = {
+            "answer": decision.answer,
             "grounded": True,
+            "verification": decision.verification,
             "stage_events": ["verify_answer"],
         }
+        if decision.warning:
+            update["warnings"] = [decision.warning]
+        return update
 
     def _direct_answer(self, state: AgentState) -> Dict[str, Any]:
         parts: List[str] = []
@@ -2320,6 +2246,7 @@ LIMIT {limit}
             "facts": [],
             "aggregates": [],
             "paths": [],
+            "verification": None,
             "error_code": None,
             "error_message": None,
             "last_error_code": None,
@@ -2383,6 +2310,7 @@ LIMIT {limit}
             facts=final_state.get("facts", []),
             aggregates=final_state.get("aggregates", []),
             paths=final_state.get("paths", []),
+            verification=final_state.get("verification"),
             warnings=final_state.get("warnings", []),
             error=err,
             session_id=session_id,
@@ -2498,6 +2426,12 @@ LIMIT {limit}
                                         for item in paths
                                     ]
                                 },
+                            )
+                        verification = update.get("verification")
+                        if verification is not None:
+                            yield GraphQAStreamEvent(
+                                event="audit",
+                                data=verification.model_dump(mode="json"),
                             )
                         for warning in update.get("warnings", []):
                             yield GraphQAStreamEvent(

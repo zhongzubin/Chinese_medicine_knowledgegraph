@@ -248,6 +248,25 @@ def render_text(response: GraphQAResponse, show_query: bool = False) -> str:
                 f"-[{item.relationship}]->"
                 f"({item.object}:{item.object_label}){source}"
             )
+    if response.verification:
+        status = (
+            "已通过证据支持校验"
+            if response.verification.status == "passed"
+            else "已回退为证据化回答"
+        )
+        lines.extend(
+            [
+                "",
+                "回答校验：",
+                (
+                    f"- {status}；覆盖 "
+                    f"{response.verification.matched_items}/"
+                    f"{response.verification.checked_items} 项，"
+                    f"缺失来源 {response.verification.missing_sources} 项"
+                ),
+                f"- {response.verification.message}",
+            ]
+        )
     if show_query and response.query:
         lines.extend(
             [

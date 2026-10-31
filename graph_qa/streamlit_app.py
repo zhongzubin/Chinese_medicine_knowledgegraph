@@ -94,6 +94,7 @@ def main() -> None:
     facts = []
     aggregates = []
     paths = []
+    verification = None
     warnings = []
     progress_labels = []
     answer_placeholder.markdown(_answer_markdown(answer))
@@ -146,6 +147,8 @@ def main() -> None:
                     aggregates = event_data.get("items", [])
                 elif event_name == "paths":
                     paths = event_data.get("items", [])
+                elif event_name == "audit":
+                    verification = event_data
                 elif event_name == "warning":
                     message = event_data.get("message")
                     if message:
@@ -163,6 +166,8 @@ def main() -> None:
                     if final_answer:
                         answer = final_answer
                         answer_placeholder.markdown(final_answer)
+                    if done_response.get("verification"):
+                        verification = done_response["verification"]
     except (requests.RequestException, RuntimeError) as exc:
         answer_placeholder.error(str(exc))
         return
@@ -171,6 +176,38 @@ def main() -> None:
     if warnings:
         for warning in warnings:
             st.warning(warning)
+    if verification:
+        with st.expander("回答校验"):
+            if verification.get("status") == "passed":
+                st.success(verification.get("message", "回答已通过证据支持校验。"))
+            else:
+                st.warning(
+                    verification.get(
+                        "message",
+                        "回答未通过证据支持校验，已回退为证据化回答。",
+                    )
+                )
+            st.caption(
+                "审核 Agent："
+                f"{verification.get('agent', 'evidence_audit')}；"
+                f"覆盖 {verification.get('matched_items', 0)}/"
+                f"{verification.get('checked_items', 0)} 项证据"
+            )
+            counts = []
+            for key, label in (
+                ("evidence_items", "关系"),
+                ("fact_items", "属性"),
+                ("aggregate_items", "统计"),
+                ("path_items", "路径"),
+            ):
+                count = verification.get(key, 0)
+                if count:
+                    counts.append(f"{label} {count}")
+            if counts:
+                st.markdown("；".join(counts))
+            missing_sources = verification.get("missing_sources", 0)
+            if missing_sources:
+                st.caption(f"其中 {missing_sources} 项未提供图谱出处。")
     if evidence:
         with st.expander("图谱证据"):
             for item in evidence:

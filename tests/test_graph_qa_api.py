@@ -12,6 +12,7 @@ from graph_qa.api import create_app
 from graph_qa.api_security import APIConfigurationError, APISettings
 from graph_qa.models import (
     AggregateFact,
+    AnswerVerification,
     AttributeFact,
     ConversationTurn,
     ErrorCode,
@@ -386,6 +387,39 @@ def test_qa_serializes_multi_hop_paths():
 
     assert response.status_code == 200
     assert response.json()["paths"][0]["intermediate"] == "人参"
+
+
+def test_qa_serializes_answer_verification():
+    engine = FakeEngine(
+        response=GraphQAResponse(
+            question="麻黄有什么功效？",
+            answer="麻黄具有发汗功效。",
+            grounded=True,
+            verification=AnswerVerification(
+                status="passed",
+                checked_items=1,
+                matched_items=1,
+                evidence_items=1,
+                fact_items=0,
+                aggregate_items=0,
+                path_items=0,
+                missing_sources=0,
+                fallback_used=False,
+                message="已核对 1 项图谱证据，回答包含可追溯事实。",
+            ),
+        )
+    )
+
+    with TestClient(make_app(engine, FakeLimitStore())) as client:
+        response = client.post(
+            "/api/v1/qa",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={"question": "麻黄有什么功效？"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["verification"]["status"] == "passed"
+    assert response.json()["verification"]["checked_items"] == 1
 
 
 def test_missing_or_wrong_api_key_returns_same_unauthorized_response():

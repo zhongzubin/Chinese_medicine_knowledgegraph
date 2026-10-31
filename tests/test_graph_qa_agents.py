@@ -3,8 +3,14 @@
 
 import pytest
 
-from graph_qa.agents import AgentDescriptor, AgentRegistry, QAAgentTeam
+from graph_qa.agents import (
+    AgentDescriptor,
+    AgentRegistry,
+    EvidenceAuditAgent,
+    QAAgentTeam,
+)
 from graph_qa.entity_linker import EntityIndex, EntityRecord
+from graph_qa.models import AttributeFact, Evidence, PathEvidence
 from graph_qa.schema import GraphSchema
 from graph_qa.workflow import GraphQAEngine, STAGE_LABELS
 
@@ -176,3 +182,97 @@ def test_stream_stage_events_include_mapped_agent_names():
         stage: EXPECTED_STAGE_AGENTS[stage]
         for stage in TRACE_STAGES
     }
+
+
+def test_evidence_audit_agent_passes_supported_answer_and_counts_sources():
+    agent = EvidenceAuditAgent()
+
+    decision = agent.audit(
+        "麻黄具有发汗功效，性味为辛、微苦，温。",
+        evidence=[
+            Evidence(
+                subject="麻黄",
+                subject_label="Herb",
+                relationship="HAS_EFFECT",
+                object="发汗",
+                object_label="Effect",
+            )
+        ],
+        facts=[
+            AttributeFact(
+                subject="麻黄",
+                subject_label="Herb",
+                attribute="property_flavor",
+                attribute_label="性味",
+                value="辛、微苦，温",
+                source="《中药大辞典》",
+            )
+        ],
+    )
+
+    assert decision.verification.status == "passed"
+    assert decision.verification.checked_items == 2
+    assert decision.verification.matched_items == 2
+    assert decision.verification.missing_sources == 1
+    assert decision.verification.fallback_used is False
+    assert decision.warning is None
+
+
+def test_evidence_audit_agent_falls_back_to_path_evidence():
+    agent = EvidenceAuditAgent()
+
+    decision = agent.audit(
+        "这是一句无法由本轮图谱证据支持的断言。",
+        evidence=[],
+        facts=[],
+        paths=[
+            PathEvidence(
+                root="四君子汤",
+                root_label="Formula",
+                first_relationship="HAS_INGREDIENT",
+                intermediate="人参",
+                intermediate_label="Herb",
+                second_relationship="HAS_EFFECT",
+                target="补气",
+                target_label="Effect",
+            )
+        ],
+    )
+
+    assert decision.verification.status == "fallback"
+    assert decision.verification.path_items == 1
+    assert decision.verification.missing_sources == 1
+    assert decision.verification.fallback_used is True
+    assert decision.warning
+    assert "HAS_INGREDIENT" in decision.answer
+    assert "HAS_EFFECT" in decision.answer
+
+
+def test_evidence_audit_agent_rejects_partial_attribute_answer():
+    agent = EvidenceAuditAgent()
+
+    decision = agent.audit(
+        "麻黄的性味是辛、微苦，温。",
+        evidence=[],
+        facts=[
+            AttributeFact(
+                subject="麻黄",
+                subject_label="Herb",
+                attribute="property_flavor",
+                attribute_label="性味",
+                value="辛、微苦，温",
+            ),
+            AttributeFact(
+                subject="麻黄",
+                subject_label="Herb",
+                attribute="meridian",
+                attribute_label="归经",
+                value="肺经、膀胱经",
+            ),
+        ],
+    )
+
+    assert decision.verification.status == "fallback"
+    assert decision.verification.checked_items == 2
+    assert decision.verification.matched_items == 1
+    assert "归经：肺经、膀胱经" in decision.answer

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
 from graph_qa.agents.base import AgentDescriptor, AgentRegistry
+from graph_qa.agents.evidence_audit import EvidenceAuditAgent
 from graph_qa.models import (
     AttributeFact,
     ConversationTurn,
@@ -137,6 +138,7 @@ class QAAgentTeam:
     dialogue: DialogueAgent = field(init=False)
     intent: IntentAgent = field(init=False)
     entity: EntityAgent = field(init=False)
+    evidence_audit: EvidenceAuditAgent = field(init=False)
     answer: AnswerAgent = field(init=False)
     registry: AgentRegistry = field(init=False)
 
@@ -144,6 +146,7 @@ class QAAgentTeam:
         self.dialogue = DialogueAgent(self.reasoner)
         self.intent = IntentAgent(self.reasoner)
         self.entity = EntityAgent(self.reasoner)
+        self.evidence_audit = EvidenceAuditAgent()
         self.answer = AnswerAgent(self.reasoner)
         self.registry = AgentRegistry(
             [
@@ -157,17 +160,7 @@ class QAAgentTeam:
                     tools=("attribute_template", "aggregate_template", "cypher_guard", "neo4j"),
                 ),
                 self.answer.descriptor,
-                AgentDescriptor(
-                    name="evidence_audit",
-                    responsibility="核对回答事实、关系证据和路径证据",
-                    stages=(
-                        "verify_answer",
-                        "clarify",
-                        "no_evidence",
-                        "safe_fail",
-                        "finish",
-                    ),
-                ),
+                self.evidence_audit.descriptor,
             ]
         )
 
