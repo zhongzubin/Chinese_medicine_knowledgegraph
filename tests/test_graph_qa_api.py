@@ -2,6 +2,7 @@
 """FastAPI 问答接口测试，不访问真实 Redis、模型或 Neo4j。"""
 
 from collections import deque
+import json
 from typing import Deque
 
 import pytest
@@ -10,6 +11,7 @@ from fastapi.testclient import TestClient
 from graph_qa.api import create_app
 from graph_qa.api_security import APIConfigurationError, APISettings
 from graph_qa.models import (
+    AttributeFact,
     ConversationTurn,
     ErrorCode,
     Evidence,
@@ -287,6 +289,36 @@ def test_qa_returns_contract_response_and_releases_lease():
     assert store.inflight == set()
     assert store.released_request_ids == [payload["request_id"]]
     assert response.headers["ratelimit-limit"] == "10"
+
+
+def test_qa_serializes_attribute_facts():
+    engine = FakeEngine(
+        response=GraphQAResponse(
+            question="麻黄性味是什么？",
+            answer="麻黄性味为辛、微苦，温。",
+            grounded=True,
+            facts=[
+                AttributeFact(
+                    subject="麻黄",
+                    subject_label="Herb",
+                    attribute="property_flavor",
+                    attribute_label="性味",
+                    value="辛、微苦，温",
+                )
+            ],
+        )
+    )
+    store = FakeLimitStore()
+
+    with TestClient(make_app(engine, store)) as client:
+        response = client.post(
+            "/api/v1/qa",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={"question": "麻黄性味是什么？"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["facts"][0]["attribute_label"] == "性味"
 
 
 def test_missing_or_wrong_api_key_returns_same_unauthorized_response():
@@ -579,3 +611,95 @@ def test_stream_endpoint_returns_sse_and_persists_completed_turn():
     assert "event: answer_delta" in response.text
     assert "event: done" in response.text
     assert len(session_store.sessions) == 1
+
+
+def test_failed_first_turn_leaves_reusable_empty_session():
+    engine = FakeEngine(
+        response=GraphQAResponse(
+            request_id="placeholder",
+            question="麻黄有什么功效？",
+            answer="图谱查询失败，请稍后重试。",
+            grounded=False,
+            error={
+                "code": ErrorCode.INTERNAL_ERROR,
+                "message": "测试失败",
+            },
+        )
+    )
+    store = FakeLimitStore()
+    session_store = FakeSessionStore()
+
+    with TestClient(
+        make_app(engine, store, session_store=session_store)
+    ) as client:
+        failed = client.post(
+            "/api/v1/qa",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={"question": "麻黄有什么功效？"},
+        )
+        session_id = failed.json()["session_id"]
+
+        engine.response = None
+        recovered = client.post(
+            "/api/v1/qa",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={
+                "question": "桂枝有什么功效？",
+                "session_id": session_id,
+            },
+        )
+
+    assert session_id
+    assert failed.status_code == 500
+    assert recovered.status_code == 200
+    turns = session_store.sessions[("test-client", session_id)]
+    assert len(turns) == 1
+    assert turns[0].question == "桂枝有什么功效？"
+
+
+def test_failed_first_stream_turn_leaves_reusable_session():
+    engine = FakeEngine(
+        response=GraphQAResponse(
+            request_id="placeholder",
+            question="麻黄有什么功效？",
+            answer="图谱查询失败，请稍后重试。",
+            grounded=False,
+            error={
+                "code": ErrorCode.INTERNAL_ERROR,
+                "message": "测试失败",
+            },
+        )
+    )
+    store = FakeLimitStore()
+    session_store = FakeSessionStore()
+
+    with TestClient(
+        make_app(engine, store, session_store=session_store)
+    ) as client:
+        failed = client.post(
+            "/api/v1/qa/stream",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={"question": "麻黄有什么功效？"},
+        )
+        done_payload = [
+            json.loads(line.removeprefix("data: "))
+            for line in failed.text.splitlines()
+            if line.startswith("data: ")
+        ][-1]
+        session_id = done_payload["response"]["session_id"]
+
+        engine.response = None
+        recovered = client.post(
+            "/api/v1/qa/stream",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={
+                "question": "桂枝有什么功效？",
+                "session_id": session_id,
+            },
+        )
+
+    assert failed.status_code == 200
+    assert recovered.status_code == 200
+    turns = session_store.sessions[("test-client", session_id)]
+    assert len(turns) == 1
+    assert turns[0].question == "桂枝有什么功效？"

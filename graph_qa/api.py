@@ -4,6 +4,7 @@
 import json
 import logging
 import uuid
+import uvicorn
 from contextlib import asynccontextmanager
 from typing import Annotated, Any, Callable, Iterator, Literal, Optional, Protocol
 from uuid import UUID
@@ -367,37 +368,52 @@ def create_app(
                     headers=rate_headers,
                     session_id=session_id,
                 )
-            if payload.session_id is not None:
+            try:
+                locked = session_store.acquire_lock(
+                    client_id,
+                    session_id,
+                    request_id,
+                )
+            except SessionStoreError as exc:
+                logger.warning("获取会话锁失败: %s", str(exc))
+                return _error_response(
+                    request_id=request_id,
+                    question=payload.question,
+                    answer="会话服务暂时不可用，请稍后重试。",
+                    code=ErrorCode.SESSION_UNAVAILABLE,
+                    message="会话服务暂时不可用",
+                    status_code=503,
+                    headers=rate_headers,
+                    session_id=session_id,
+                )
+            if not locked:
+                return _error_response(
+                    request_id=request_id,
+                    question=payload.question,
+                    answer="该会话正在处理其他问题，请稍后重试。",
+                    code=ErrorCode.SESSION_BUSY,
+                    message="同一会话不能并发处理多个请求",
+                    status_code=409,
+                    headers=rate_headers,
+                    session_id=session_id,
+                )
+            session_lock_token = request_id
+            if payload.session_id is None:
                 try:
-                    locked = session_store.acquire_lock(
-                        client_id,
-                        session_id,
-                        request_id,
-                    )
+                    session_store.save(client_id, session_id, [])
                 except SessionStoreError as exc:
-                    logger.warning("获取会话锁失败: %s", str(exc))
+                    logger.warning("创建会话失败: %s", str(exc))
                     return _error_response(
                         request_id=request_id,
                         question=payload.question,
                         answer="会话服务暂时不可用，请稍后重试。",
                         code=ErrorCode.SESSION_UNAVAILABLE,
-                        message="会话服务暂时不可用",
+                        message="无法创建会话",
                         status_code=503,
                         headers=rate_headers,
                         session_id=session_id,
                     )
-                if not locked:
-                    return _error_response(
-                        request_id=request_id,
-                        question=payload.question,
-                        answer="该会话正在处理其他问题，请稍后重试。",
-                        code=ErrorCode.SESSION_BUSY,
-                        message="同一会话不能并发处理多个请求",
-                        status_code=409,
-                        headers=rate_headers,
-                        session_id=session_id,
-                    )
-                session_lock_token = request_id
+            else:
                 try:
                     loaded_history = session_store.load(
                         client_id,
@@ -592,15 +608,57 @@ def create_app(
                 session_id=session_id,
             )
 
-        if payload.session_id is not None:
+        try:
+            locked = session_store.acquire_lock(
+                client_id,
+                session_id,
+                request_id,
+            )
+        except SessionStoreError as exc:
+            logger.warning("获取流式会话锁失败: %s", str(exc))
             try:
-                locked = session_store.acquire_lock(
-                    client_id,
-                    session_id,
-                    request_id,
-                )
+                store.release_concurrency(request_id)
+            except Exception:
+                pass
+            return _error_response(
+                request_id=request_id,
+                question=payload.question,
+                answer="会话服务暂时不可用，请稍后重试。",
+                code=ErrorCode.SESSION_UNAVAILABLE,
+                message="会话服务暂时不可用",
+                status_code=503,
+                headers=rate_headers,
+                session_id=session_id,
+            )
+        if not locked:
+            try:
+                store.release_concurrency(request_id)
+            except Exception:
+                pass
+            return _error_response(
+                request_id=request_id,
+                question=payload.question,
+                answer="该会话正在处理其他问题，请稍后重试。",
+                code=ErrorCode.SESSION_BUSY,
+                message="同一会话不能并发处理多个请求",
+                status_code=409,
+                headers=rate_headers,
+                session_id=session_id,
+            )
+        session_lock_token = request_id
+        if payload.session_id is None:
+            try:
+                session_store.save(client_id, session_id, [])
             except SessionStoreError as exc:
-                logger.warning("获取流式会话锁失败: %s", str(exc))
+                logger.warning("创建流式会话失败: %s", str(exc))
+                try:
+                    session_store.release_lock(
+                        client_id,
+                        session_id,
+                        request_id,
+                    )
+                except SessionStoreError:
+                    pass
                 try:
                     store.release_concurrency(request_id)
                 except Exception:
@@ -610,27 +668,12 @@ def create_app(
                     question=payload.question,
                     answer="会话服务暂时不可用，请稍后重试。",
                     code=ErrorCode.SESSION_UNAVAILABLE,
-                    message="会话服务暂时不可用",
+                    message="无法创建会话",
                     status_code=503,
                     headers=rate_headers,
                     session_id=session_id,
                 )
-            if not locked:
-                try:
-                    store.release_concurrency(request_id)
-                except Exception:
-                    pass
-                return _error_response(
-                    request_id=request_id,
-                    question=payload.question,
-                    answer="该会话正在处理其他问题，请稍后重试。",
-                    code=ErrorCode.SESSION_BUSY,
-                    message="同一会话不能并发处理多个请求",
-                    status_code=409,
-                    headers=rate_headers,
-                    session_id=session_id,
-                )
-            session_lock_token = request_id
+        else:
             try:
                 loaded_history = session_store.load(client_id, session_id)
             except SessionStoreError as exc:
@@ -976,3 +1019,7 @@ def create_app(
 
 
 app = create_app()
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8000)

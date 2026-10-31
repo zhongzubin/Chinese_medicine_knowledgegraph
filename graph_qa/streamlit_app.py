@@ -91,6 +91,7 @@ def main() -> None:
     label = "正在连接问答服务…"
     answer = ""
     evidence = []
+    facts = []
     warnings = []
     progress_labels = []
     answer_placeholder.markdown(_answer_markdown(answer))
@@ -137,6 +138,8 @@ def main() -> None:
                     answer_placeholder.markdown(_answer_markdown(answer))
                 elif event_name == "evidence":
                     evidence = event_data.get("items", [])
+                elif event_name == "facts":
+                    facts = event_data.get("items", [])
                 elif event_name == "warning":
                     message = event_data.get("message")
                     if message:
@@ -170,6 +173,18 @@ def main() -> None:
                     f"- `{item['subject']}:{item['subject_label']}` "
                     f"-[{item['relationship']}]-> "
                     f"`{item['object']}:{item['object_label']}`{source}"
+                )
+    if facts:
+        with st.expander("图谱属性"):
+            for item in facts:
+                source = (
+                    f"（来源：{item['source']}）"
+                    if item.get("source")
+                    else "（当前图谱未提供出处）"
+                )
+                st.markdown(
+                    f"- `{item['subject']}:{item['subject_label']}` "
+                    f"{item['attribute_label']}：{item['value']}{source}"
                 )
     if st.session_state.session_id:
         st.caption(f"会话：{st.session_state.session_id}")

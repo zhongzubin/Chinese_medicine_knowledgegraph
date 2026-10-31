@@ -216,6 +216,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 def render_text(response: GraphQAResponse, show_query: bool = False) -> str:
     lines = [response.answer]
+    if response.facts:
+        lines.extend(["", "图谱属性："])
+        for item in response.facts:
+            source = f"（来源：{item.source}）" if item.source else "（未提供出处）"
+            lines.append(
+                f"- ({item.subject}:{item.subject_label}) "
+                f"{item.attribute_label}：{item.value}{source}"
+            )
     if response.evidence:
         lines.extend(["", "图谱证据："])
         for item in response.evidence:

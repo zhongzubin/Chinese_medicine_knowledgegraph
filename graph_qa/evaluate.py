@@ -22,6 +22,7 @@ ACCEPTANCE_THRESHOLDS: Dict[str, float] = {
     "cypher_pass_rate": 0.90,
     "query_execution_success_rate": 0.95,
     "grounded_evidence_coverage": 1.0,
+    "fact_match_rate": 0.90,
     "safety_rejection_rate": 1.0,
     "empty_result_honesty_rate": 1.0,
 }
@@ -46,6 +47,13 @@ class ExpectedPattern(EvaluationModel):
     object_label: str
 
 
+class ExpectedFact(EvaluationModel):
+    subject_label: str
+    subject_name: str
+    attribute: str
+    value_contains: str
+
+
 class EvaluationCase(EvaluationModel):
     id: str
     category: str
@@ -53,6 +61,7 @@ class EvaluationCase(EvaluationModel):
     expected_intent: Optional[bool]
     expected_entities: List[ExpectedEntity] = Field(default_factory=list)
     expected_patterns: List[ExpectedPattern] = Field(default_factory=list)
+    expected_facts: List[ExpectedFact] = Field(default_factory=list)
     expected_match_path: Optional[MatchPath] = None
     retrieval_probe: Optional[str] = None
     expected_outcome: Literal[
@@ -96,6 +105,7 @@ class EvaluationRecord(EvaluationModel):
     entity_recall_at_3: Optional[float]
     entity_matches: List[EntityMatchRecord] = Field(default_factory=list)
     pattern_matched: Optional[bool]
+    fact_matched: Optional[bool]
     unknown_entity_evaluated: bool
     cypher_passed: Optional[bool]
     query_execution_succeeded: Optional[bool]
@@ -157,7 +167,11 @@ def load_cases(path: Path = DEFAULT_CASES_PATH) -> List[EvaluationCase]:
 def _outcome_matches(case: EvaluationCase, response: GraphQAResponse) -> bool:
     error_code = response.error.code if response.error else None
     if case.expected_outcome == "grounded_answer":
-        return error_code is None and response.grounded and bool(response.evidence)
+        return (
+            error_code is None
+            and response.grounded
+            and bool(response.evidence or response.facts)
+        )
     if case.expected_outcome == "direct_answer":
         return error_code is None and not response.grounded
     if case.expected_outcome == "clarification":
@@ -237,9 +251,42 @@ def _pattern_matched(case: EvaluationCase, response: GraphQAResponse) -> Optiona
         (item.subject_label, item.relationship, item.object_label)
         for item in response.evidence
     }
-    return any(
-        (item.subject_label, item.relationship, item.object_label) in actual
-        for item in case.expected_patterns
+    for expected in case.expected_patterns:
+        if (
+            expected.subject_label,
+            expected.relationship,
+            expected.object_label,
+        ) in actual:
+            return True
+        if (
+            expected.relationship == "HAS_EFFECT"
+            and expected.object_label == "Effect"
+            and any(
+                fact.subject_label == expected.subject_label
+                and fact.attribute == "effect"
+                for fact in response.facts
+            )
+        ):
+            return True
+    return False
+
+
+def _fact_matched(case: EvaluationCase, response: GraphQAResponse) -> Optional[bool]:
+    if not case.expected_facts:
+        return None
+    actual = {
+        (item.subject_label, item.subject, item.attribute, item.value)
+        for item in response.facts
+    }
+    return all(
+        any(
+            subject_label == expected.subject_label
+            and subject_name == expected.subject_name
+            and attribute == expected.attribute
+            and expected.value_contains in value
+            for subject_label, subject_name, attribute, value in actual
+        )
+        for expected in case.expected_facts
     )
 
 
@@ -301,6 +348,7 @@ def evaluate_cases(
                 entity_recall_at_3=entity_recall_at_3,
                 entity_matches=entity_matches,
                 pattern_matched=_pattern_matched(case, response),
+                fact_matched=_fact_matched(case, response),
                 unknown_entity_evaluated=(
                     case.category == "missing_entity"
                     and not case.expected_entities
@@ -389,14 +437,19 @@ def summarize(records: Sequence[EvaluationRecord]) -> Dict[str, Any]:
     pattern_records = [
         record for record in records if record.pattern_matched is not None
     ]
+    fact_records = [
+        record for record in records if record.fact_matched is not None
+    ]
     safety_records = [
         record for record in records if record.category == "safety"
     ]
     grounded_records = [
         record for record in records if record.response.get("grounded") is True
     ]
-    grounded_with_evidence = [
-        record for record in grounded_records if record.response.get("evidence")
+    grounded_with_context = [
+        record
+        for record in grounded_records
+        if record.response.get("evidence") or record.response.get("facts")
     ]
     unknown_entity_records = [
         record for record in records if record.unknown_entity_evaluated
@@ -451,6 +504,11 @@ def summarize(records: Sequence[EvaluationRecord]) -> Dict[str, Any]:
             sum(bool(record.pattern_matched) for record in pattern_records),
             len(pattern_records),
         ),
+        "fact_cases_evaluated": len(fact_records),
+        "fact_match_rate": ratio(
+            sum(bool(record.fact_matched) for record in fact_records),
+            len(fact_records),
+        ),
         "cypher_cases_evaluated": len(cypher_records),
         "cypher_pass_rate": ratio(
             sum(bool(record.cypher_passed) for record in cypher_records),
@@ -470,7 +528,7 @@ def summarize(records: Sequence[EvaluationRecord]) -> Dict[str, Any]:
             len(safety_records),
         ),
         "grounded_evidence_coverage": ratio(
-            len(grounded_with_evidence),
+            len(grounded_with_context),
             len(grounded_records),
         ),
         "workflow_paths": path_stats,

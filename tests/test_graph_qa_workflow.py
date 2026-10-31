@@ -6,6 +6,7 @@ from typing import List, Sequence
 from graph_qa.entity_linker import EntityIndex, EntityRecord
 from graph_qa.llm import ReasonerError
 from graph_qa.models import (
+    AttributeFact,
     ConversationTurn,
     CypherPlan,
     EntityCandidate,
@@ -18,7 +19,12 @@ from graph_qa.models import (
     UsedEntityRef,
 )
 from graph_qa.schema import GraphSchema
-from graph_qa.workflow import GraphQAEngine, evidence_matches_used_entities
+from graph_qa.workflow import (
+    GraphQAEngine,
+    _normalize_answer_formatting,
+    evidence_from_rows,
+    evidence_matches_used_entities,
+)
 
 VALID_QUERY = """
 MATCH (subject:Herb)-[relationship:HAS_EFFECT]->(object:Effect)
@@ -42,23 +48,83 @@ ROWS = [
         "source": None,
     }
 ]
+ATTRIBUTE_ROWS = [
+    {
+        "subject": "麻黄",
+        "subject_label": "Herb",
+        "properties": {
+            "property_flavor": "辛、微苦，温",
+            "meridian": "归肺经、膀胱经",
+        },
+        "sources": ["《中药大辞典》"],
+    }
+]
+FORMULA_INGREDIENT_ROWS = [
+    {
+        "subject": "四君子汤",
+        "subject_label": "Formula",
+        "relationship": "HAS_INGREDIENT",
+        "object": "人参",
+        "object_label": "Herb",
+        "source": None,
+    }
+]
 
 
 def make_schema() -> GraphSchema:
+    properties = {
+        "Herb": [
+            "name",
+            "property_flavor",
+            "meridian",
+            "dosage",
+            "taboo",
+            "usage",
+            "effect",
+            "indication",
+        ],
+        "Formula": [
+            "name",
+            "effect",
+            "indication",
+            "usage",
+            "taboo",
+        ],
+    }
     return GraphSchema.from_mapping(
         {
             "format_version": "1.1",
             "node_labels": [
-                {"label": label, "properties": [{"name": "name"}]}
+                {
+                    "label": label,
+                    "properties": [
+                        {"name": property_name}
+                        for property_name in properties.get(label, ["name"])
+                    ],
+                }
                 for label in ("Herb", "Formula", "Disease", "Symptom", "Effect", "Source")
             ],
-            "relationship_types": [{"type": "HAS_EFFECT"}],
+            "relationship_types": [
+                {"type": "HAS_EFFECT"},
+                {"type": "HAS_INGREDIENT"},
+                {"type": "FROM_SOURCE"},
+            ],
             "triple_patterns": [
                 {
                     "subject_label": "Herb",
                     "relationship_type": "HAS_EFFECT",
                     "object_label": "Effect",
-                }
+                },
+                {
+                    "subject_label": "Formula",
+                    "relationship_type": "HAS_INGREDIENT",
+                    "object_label": "Herb",
+                },
+                {
+                    "subject_label": "Herb",
+                    "relationship_type": "FROM_SOURCE",
+                    "object_label": "Source",
+                },
             ],
         }
     )
@@ -84,6 +150,15 @@ def make_index_with_guizhi() -> EntityIndex:
 
 def make_entity_index_with_effect_name() -> EntityIndex:
     return EntityIndex.from_records([EntityRecord("Effect", "功效")])
+
+
+def make_formula_index() -> EntityIndex:
+    return EntityIndex.from_records(
+        [
+            EntityRecord("Formula", "四君子汤"),
+            EntityRecord("Herb", "人参"),
+        ]
+    )
 
 
 def make_plan(
@@ -162,6 +237,7 @@ class FakeReasoner:
         linked_entities: Sequence[LinkedEntity],
         rows: Sequence[dict],
         evidence: Sequence[Evidence],
+        facts: Sequence[AttributeFact] = (),
     ) -> str:
         self.answer_calls += 1
         return self.grounded_answer
@@ -172,6 +248,7 @@ class FakeReasoner:
         linked_entities,
         rows,
         evidence,
+        facts,
         on_token,
     ):
         self.answer_calls += 1
@@ -183,10 +260,12 @@ class FakeReasoner:
 
 
 class FakeRepository:
-    def __init__(self, rows=ROWS):
+    def __init__(self, rows=ROWS, attribute_rows=None):
         self.rows = rows
+        self.attribute_rows = attribute_rows or []
         self.explain_calls = 0
         self.execute_calls = 0
+        self.attribute_calls = 0
         self.closed = False
 
     def load_entity_index(self):
@@ -202,6 +281,17 @@ class FakeRepository:
             parameters=plan.parameters,
             rows=list(self.rows),
             row_count=len(self.rows),
+            elapsed_ms=1,
+            limit_applied=20,
+        )
+
+    def execute_attributes(self, plan) -> QueryResult:
+        self.attribute_calls += 1
+        return QueryResult(
+            cypher="MATCH (subject) RETURN properties(subject)",
+            parameters={},
+            rows=list(self.attribute_rows),
+            row_count=len(self.attribute_rows),
             elapsed_ms=1,
             limit_applied=20,
         )
@@ -248,11 +338,196 @@ def test_workflow_returns_grounded_answer_query_and_evidence():
     assert response.grounded is True
     assert response.error is None
     assert response.linked_entities[0].name == "麻黄"
-    assert response.query and response.query.cypher == VALID_QUERY
+    assert response.query
+    assert "HAS_EFFECT" in response.query.cypher
+    assert "$entity_names" in response.query.cypher
     assert response.evidence[0].object == "发汗"
     assert "不能替代专业医疗诊断和治疗" in response.answer
     assert repository.explain_calls == 1
     assert repository.execute_calls == 1
+
+
+def test_attribute_question_uses_controlled_template_and_facts():
+    reasoner = FakeReasoner(
+        intent=tcm_intent(),
+        grounded_answer="麻黄的性味是辛、微苦，温；归肺经、膀胱经。",
+    )
+    repository = FakeRepository(attribute_rows=ATTRIBUTE_ROWS)
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_index(),
+    )
+
+    response = engine.answer("麻黄性味归经是什么？")
+
+    assert response.error is None
+    assert response.grounded is True
+    assert response.evidence == []
+    assert {item.attribute for item in response.facts} == {
+        "property_flavor",
+        "meridian",
+    }
+    assert all(item.source == "《中药大辞典》" for item in response.facts)
+    assert response.query is not None
+    assert repository.attribute_calls == 1
+    assert repository.execute_calls == 0
+    assert reasoner.plan_calls == 0
+    assert reasoner.answer_calls == 0
+
+
+def test_stream_answer_emits_attribute_facts_and_verification_stage():
+    reasoner = FakeReasoner(
+        intent=tcm_intent(),
+        grounded_answer="麻黄的性味是辛、微苦，温。",
+    )
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=FakeRepository(attribute_rows=ATTRIBUTE_ROWS),
+        schema=make_schema(),
+        entity_index=make_index(),
+    )
+
+    events = list(engine.stream_answer("麻黄性味是什么？"))
+
+    fact_event = next(event for event in events if event.event == "facts")
+    stages = {
+        event.data["stage"]
+        for event in events
+        if event.event == "stage"
+    }
+    assert fact_event.data["items"][0]["attribute_label"] == "性味"
+    assert "verify_answer" in stages
+
+
+def test_missing_attribute_falls_back_to_relation_query():
+    reasoner = FakeReasoner(
+        intent=tcm_intent(),
+        plans=[make_plan()],
+    )
+    repository = FakeRepository(attribute_rows=[])
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_index(),
+    )
+
+    response = engine.answer("麻黄有什么功效？")
+
+    assert response.error is None
+    assert response.grounded is True
+    assert response.facts == []
+    assert response.evidence[0].object == "发汗"
+    assert response.query is not None
+    assert "HAS_EFFECT" in response.query.cypher
+    assert repository.attribute_calls == 1
+    assert repository.execute_calls == 1
+    assert reasoner.plan_calls == 0
+    assert any("关系回答" in warning for warning in response.warnings)
+
+
+def test_missing_non_relation_attribute_returns_no_evidence():
+    reasoner = FakeReasoner(intent=tcm_intent())
+    repository = FakeRepository(attribute_rows=[])
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_index(),
+    )
+
+    response = engine.answer("麻黄有什么禁忌？")
+
+    assert response.error is None
+    assert response.grounded is False
+    assert response.facts == []
+    assert "没有找到" in response.answer
+    assert repository.attribute_calls == 1
+    assert repository.execute_calls == 0
+    assert reasoner.plan_calls == 0
+
+
+def test_formula_ingredient_question_uses_relationship_template():
+    reasoner = FakeReasoner(
+        intent=tcm_intent(),
+        grounded_answer="四君子汤含有的人参可由当前图谱关系确认。",
+    )
+    repository = FakeRepository(rows=FORMULA_INGREDIENT_ROWS)
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_formula_index(),
+    )
+
+    response = engine.answer("四君子汤由哪些药材组成？")
+
+    assert response.error is None
+    assert response.grounded is True
+    assert response.evidence[0].object == "人参"
+    assert response.query is not None
+    assert "HAS_INGREDIENT" in response.query.cypher
+    assert reasoner.plan_calls == 0
+    assert repository.execute_calls == 1
+
+
+def test_reverse_formula_lookup_uses_relationship_template():
+    reasoner = FakeReasoner(
+        intent=tcm_intent(),
+        grounded_answer="四君子汤含有人参。",
+    )
+    repository = FakeRepository(rows=FORMULA_INGREDIENT_ROWS)
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_formula_index(),
+    )
+
+    response = engine.answer("哪些方剂含有人参？")
+
+    assert response.error is None
+    assert response.grounded is True
+    assert response.query is not None
+    assert "object.name IN $entity_names" in response.query.cypher
+    assert reasoner.plan_calls == 0
+
+
+def test_entity_source_question_uses_forward_relationship_direction():
+    reasoner = FakeReasoner(
+        intent=tcm_intent(),
+        grounded_answer="大枣出处为《本草纲目》。",
+    )
+    repository = FakeRepository(
+        rows=[
+            {
+                "subject": "大枣",
+                "subject_label": "Herb",
+                "relationship": "FROM_SOURCE",
+                "object": "《本草纲目》",
+                "object_label": "Source",
+                "source": None,
+            }
+        ]
+    )
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=EntityIndex.from_records(
+            [EntityRecord("Herb", "大枣")]
+        ),
+    )
+
+    response = engine.answer("大枣的出处有哪些？")
+
+    assert response.grounded is True
+    assert response.query is not None
+    assert "MATCH (subject:Herb)-[relationship:FROM_SOURCE]" in response.query.cypher
+    assert "OPTIONAL MATCH" not in response.query.cypher
+    assert reasoner.plan_calls == 0
 
 
 def test_conversation_history_rewrites_pronoun_before_entity_linking():
@@ -296,6 +571,87 @@ def test_conversation_history_rewrites_pronoun_before_entity_linking():
     assert reasoner.rewrite_calls[0][1] == history
 
 
+def test_explicit_new_entity_skips_context_rewrite():
+    reasoner = FakeReasoner(intent=tcm_intent())
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=FakeRepository(),
+        schema=make_schema(),
+        entity_index=EntityIndex.from_records(
+            [
+                EntityRecord("Herb", "麻黄"),
+                EntityRecord("Herb", "桂枝"),
+            ]
+        ),
+    )
+    history = [
+        ConversationTurn(
+            question="麻黄有什么功效？",
+            answer="麻黄具有发汗功效。",
+            linked_entities=[
+                LinkedEntity(
+                    label="Herb",
+                    name="麻黄",
+                    matched_text="麻黄",
+                    match_type="name",
+                    score=1.0,
+                )
+            ],
+            grounded=True,
+        )
+    ]
+
+    update = engine._rewrite_question(
+        {
+            "normalized_question": "桂枝有什么功效？",
+            "conversation_history": history,
+        }
+    )
+
+    assert update["rewritten_question"] == "桂枝有什么功效？"
+    assert reasoner.rewrite_calls == []
+
+
+def test_rewrite_failure_uses_recent_entity_and_pronoun():
+    class FailingRewriteReasoner(FakeReasoner):
+        def rewrite_question(self, question, history):
+            raise RuntimeError("rewrite unavailable")
+
+    reasoner = FailingRewriteReasoner(intent=tcm_intent())
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=FakeRepository(),
+        schema=make_schema(),
+        entity_index=make_index(),
+    )
+    history = [
+        ConversationTurn(
+            question="麻黄有什么功效？",
+            answer="麻黄具有发汗功效。",
+            linked_entities=[
+                LinkedEntity(
+                    label="Herb",
+                    name="麻黄",
+                    matched_text="麻黄",
+                    match_type="name",
+                    score=1.0,
+                )
+            ],
+            grounded=True,
+        )
+    ]
+
+    update = engine._rewrite_question(
+        {
+            "normalized_question": "它有什么禁忌？",
+            "conversation_history": history,
+        }
+    )
+
+    assert update["rewritten_question"] == "麻黄有什么禁忌?"
+    assert update["warnings"]
+
+
 def test_stream_answer_emits_public_stages_progress_and_answer_deltas():
     reasoner = FakeReasoner(
         intent=tcm_intent(),
@@ -332,6 +688,59 @@ def test_stream_answer_emits_public_stages_progress_and_answer_deltas():
     }.issubset(stage_names)
     assert answer_text == done.data["response"]["answer"]
     assert done.data["response"]["grounded"] is True
+
+
+def test_unsupported_answer_is_replaced_by_evidence_fallback():
+    engine = GraphQAEngine(
+        reasoner=FakeReasoner(intent=tcm_intent()),
+        repository=FakeRepository(),
+        schema=make_schema(),
+        entity_index=make_index(),
+    )
+
+    update = engine._verify_answer(
+        {
+            "answer": "麻黄可以治疗任何疾病。",
+            "evidence": [
+                Evidence(
+                    subject="麻黄",
+                    subject_label="Herb",
+                    relationship="HAS_EFFECT",
+                    object="发汗",
+                    object_label="Effect",
+                )
+            ],
+            "facts": [],
+        }
+    )
+
+    assert "发汗" in update["answer"]
+    assert update["grounded"] is True
+    assert update["warnings"]
+
+
+def test_answer_formatting_splits_inline_markdown_bullets():
+    facts = [
+        AttributeFact(
+            subject="麻黄",
+            subject_label="Herb",
+            attribute="property_flavor",
+            attribute_label="性味",
+            value="辛、微苦，温",
+        ),
+        AttributeFact(
+            subject="麻黄",
+            subject_label="Herb",
+            attribute="meridian",
+            attribute_label="归经",
+            value="肺经",
+        ),
+    ]
+
+    assert _normalize_answer_formatting(
+        "属性如下：-**性味**：辛、微苦，温-归经：肺经",
+        facts,
+    ) == "属性如下：\n性味：辛、微苦，温\n归经：肺经"
 
 
 def test_non_tcm_question_uses_direct_answer_without_graph_query():
@@ -371,7 +780,7 @@ def test_known_graph_entity_overrides_incorrect_model_intent():
         entity_index=make_index(),
     )
 
-    response = engine.answer("麻黄有什么功效？")
+    response = engine.answer("麻黄能做什么？")
 
     assert response.intent is not None
     assert response.intent.is_tcm_question is True
@@ -478,7 +887,7 @@ def test_invalid_cypher_is_retried_three_times_then_fails_safely():
         entity_index=make_index(),
     )
 
-    response = engine.answer("麻黄有什么功效？")
+    response = engine.answer("麻黄能做什么？")
 
     assert response.error is not None
     assert response.error.code == ErrorCode.CYPHER_REJECTED
@@ -505,7 +914,7 @@ def test_model_query_output_error_uses_stable_error_code():
         entity_index=make_index(),
     )
 
-    response = engine.answer("麻黄有什么功效？")
+    response = engine.answer("麻黄能做什么？")
 
     assert response.error is not None
     assert response.error.code == ErrorCode.MODEL_OUTPUT_INVALID
@@ -528,7 +937,7 @@ def test_query_parameters_must_include_linked_entity_name():
         entity_index=make_index(),
     )
 
-    response = engine.answer("麻黄有什么功效？")
+    response = engine.answer("麻黄能做什么？")
 
     assert response.error is not None
     assert response.error.code == ErrorCode.CYPHER_REJECTED
@@ -595,6 +1004,24 @@ def test_evidence_must_match_a_used_entity():
     ) is False
 
 
+def test_evidence_merges_multiple_sources_for_the_same_relation():
+    rows = [
+        {
+            **ROWS[0],
+            "source": "《局方》",
+        },
+        {
+            **ROWS[0],
+            "source": "《宋·太平惠民和剂局方》",
+        },
+    ]
+
+    evidence = evidence_from_rows(rows, make_schema())
+
+    assert len(evidence) == 1
+    assert evidence[0].source == "《局方》；《宋·太平惠民和剂局方》"
+
+
 def test_unrelated_evidence_does_not_mark_answer_grounded():
     reasoner = FakeReasoner(
         intent=tcm_intent(),
@@ -619,7 +1046,14 @@ def test_unrelated_evidence_does_not_mark_answer_grounded():
 
 def test_answer_model_failure_uses_evidence_fallback():
     class FailingAnswerReasoner(FakeReasoner):
-        def answer_from_graph(self, question, linked_entities, rows, evidence):
+        def answer_from_graph(
+            self,
+            question,
+            linked_entities,
+            rows,
+            evidence,
+            facts=(),
+        ):
             raise RuntimeError("model down")
 
         def stream_answer_from_graph(
@@ -628,6 +1062,7 @@ def test_answer_model_failure_uses_evidence_fallback():
             linked_entities,
             rows,
             evidence,
+            facts,
             on_token,
         ):
             raise RuntimeError("model down")
@@ -644,7 +1079,7 @@ def test_answer_model_failure_uses_evidence_fallback():
         entity_index=make_index(),
     )
 
-    response = engine.answer("麻黄有什么功效？")
+    response = engine.answer("麻黄能做什么？")
 
     assert response.grounded is True
     assert "麻黄" in response.answer

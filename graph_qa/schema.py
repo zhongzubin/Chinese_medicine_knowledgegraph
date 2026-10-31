@@ -37,6 +37,43 @@ EVIDENCE_RETURN_ALIASES: FrozenSet[str] = frozenset(
         "source",
     }
 )
+ATTRIBUTE_FIELDS_BY_LABEL: Mapping[str, Tuple[str, ...]] = {
+    "Herb": (
+        "alias",
+        "effect",
+        "indication",
+        "dosage",
+        "meridian",
+        "place",
+        "processing",
+        "property_flavor",
+        "taboo",
+        "traits",
+        "usage",
+    ),
+    "Formula": (
+        "alias",
+        "effect",
+        "indication",
+        "ingredients",
+        "taboo",
+        "usage",
+    ),
+}
+ATTRIBUTE_DISPLAY_NAMES: Mapping[str, str] = {
+    "alias": "别名",
+    "effect": "功效",
+    "indication": "主治",
+    "dosage": "用量",
+    "meridian": "归经",
+    "place": "产地",
+    "processing": "炮制",
+    "property_flavor": "性味",
+    "taboo": "禁忌",
+    "traits": "性状",
+    "usage": "用法",
+    "ingredients": "组成",
+}
 
 
 class SchemaError(ValueError):
@@ -76,6 +113,20 @@ class GraphSchema:
     def assert_relationship(self, relationship_type: str) -> None:
         if relationship_type not in self.relationship_types:
             raise SchemaError(f"未知关系类型: {relationship_type}")
+
+    def assert_property(self, label: str, property_name: str) -> None:
+        self.assert_label(label)
+        if property_name not in self.labels[label]:
+            raise SchemaError(f"标签 {label} 不允许属性: {property_name}")
+
+    def queryable_attributes(self, label: str) -> Tuple[str, ...]:
+        self.assert_label(label)
+        allowed = self.labels[label]
+        return tuple(
+            attribute
+            for attribute in ATTRIBUTE_FIELDS_BY_LABEL.get(label, ())
+            if attribute in allowed and attribute in ATTRIBUTE_DISPLAY_NAMES
+        )
 
     def assert_pattern(self, subject_label: str, relationship_type: str, object_label: str) -> None:
         key = (subject_label, relationship_type, object_label)

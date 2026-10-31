@@ -5,8 +5,17 @@ from neo4j import READ_ACCESS
 import pytest
 
 from graph_qa.cypher_guard import CypherGuard, CypherGuardError
-from graph_qa.models import CypherPlan, UsedEntityRef
-from graph_qa.neo4j_repository import ENTITY_INDEX_QUERY, Neo4jRepository
+from graph_qa.models import (
+    AttributeQueryPlan,
+    AttributeSelection,
+    CypherPlan,
+    UsedEntityRef,
+)
+from graph_qa.neo4j_repository import (
+    ENTITY_INDEX_QUERY,
+    Neo4jRepository,
+    RepositoryError,
+)
 from graph_qa.schema import GraphSchema
 
 VALID_QUERY = """
@@ -23,11 +32,27 @@ LIMIT 10
 
 
 def make_schema() -> GraphSchema:
+    properties = {
+        "Herb": [
+            "name",
+            "property_flavor",
+            "meridian",
+            "dosage",
+            "taboo",
+        ],
+        "Formula": ["name", "effect", "usage"],
+    }
     return GraphSchema.from_mapping(
         {
             "format_version": "1.1",
             "node_labels": [
-                {"label": label, "properties": [{"name": "name"}]}
+                {
+                    "label": label,
+                    "properties": [
+                        {"name": property_name}
+                        for property_name in properties.get(label, ["name"])
+                    ],
+                }
                 for label in ("Herb", "Formula", "Disease", "Symptom", "Effect", "Source")
             ],
             "relationship_types": [{"type": "HAS_EFFECT"}],
@@ -194,5 +219,73 @@ def test_repository_rejects_write_query_before_opening_transaction():
 
     with pytest.raises(CypherGuardError):
         repository.execute_read(plan)
+
+    assert session.begin_calls == []
+
+
+def test_execute_attributes_uses_controlled_query_and_filters_fields():
+    session = FakeSession(
+        query_rows=[
+            {
+                "subject": "麻黄",
+                "subject_label": "Herb",
+                "properties": {
+                    "name": "麻黄",
+                    "property_flavor": "辛、微苦，温",
+                    "meridian": "归肺经、膀胱经",
+                    "taboo": "体虚自汗者忌服",
+                },
+                "sources": ["《中药大辞典》"],
+            }
+        ]
+    )
+    repository, _driver = make_repository(session)
+    plan = AttributeQueryPlan(
+        used_entities=[UsedEntityRef(label="Herb", name="麻黄")],
+        selections=[
+            AttributeSelection(
+                label="Herb",
+                attributes=["property_flavor", "meridian"],
+            )
+        ],
+    )
+
+    result = repository.execute_attributes(plan)
+
+    assert result.row_count == 1
+    assert result.rows == [
+        {
+            "subject": "麻黄",
+            "subject_label": "Herb",
+            "properties": {
+                "meridian": "归肺经、膀胱经",
+                "property_flavor": "辛、微苦，温",
+            },
+            "sources": ["《中药大辞典》"],
+        }
+    ]
+    query, parameters = session.transaction.queries[0]
+    assert "properties(subject)" in query
+    assert parameters == {
+        "labels": ["Herb"],
+        "entity_names": ["麻黄"],
+    }
+
+
+def test_execute_attributes_rejects_non_whitelisted_field():
+    session = FakeSession(query_rows=[])
+    repository, _driver = make_repository(session)
+    plan = AttributeQueryPlan(
+        used_entities=[UsedEntityRef(label="Herb", name="麻黄")],
+        selections=[
+            AttributeSelection(
+                label="Herb",
+                attributes=["password"],
+            )
+        ],
+    )
+
+    with pytest.raises(RepositoryError, match="属性查询包含未允许的字段"):
+        repository.execute_attributes(plan)
 
     assert session.begin_calls == []

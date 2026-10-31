@@ -4,7 +4,7 @@
 import json
 from typing import Sequence
 
-from graph_qa.models import ConversationTurn, LinkedEntity
+from graph_qa.models import AttributeFact, ConversationTurn, LinkedEntity
 from graph_qa.schema import GraphSchema
 
 SAFETY_SYSTEM_PROMPT = (
@@ -213,6 +213,7 @@ def graph_answer_prompt(
     linked_entities: Sequence[LinkedEntity],
     rows: Sequence[dict],
     evidence: Sequence[dict],
+    facts: Sequence[AttributeFact],
 ) -> str:
     linked_json = json.dumps(
         [{"label": item.label, "name": item.name} for item in linked_entities],
@@ -221,14 +222,23 @@ def graph_answer_prompt(
     )
     rows_json = json.dumps(list(rows), ensure_ascii=False, indent=2)
     evidence_json = json.dumps(list(evidence), ensure_ascii=False, indent=2)
+    facts_json = json.dumps(
+        [item.model_dump(mode="json") for item in facts],
+        ensure_ascii=False,
+        indent=2,
+    )
     return f"""
-你是中医知识图谱问答助手。只能使用下面实际查询结果中的信息回答。
+你是中医知识图谱问答助手。只能使用下面实际查询结果和属性事实回答。
 
 要求：
-1. 不得添加查询结果没有的药材、方剂、疾病、症状、剂量、禁忌或出处。
+1. 不得添加查询结果和属性事实没有的药材、方剂、疾病、症状、剂量、禁忌或出处。
 2. 不得进行个体诊断或开具处方。
 3. 如果结果不足以回答问题，明确说明“当前图谱没有找到足够依据”。
 4. 使用简洁自然的中文，不要输出内部推理、Cypher 或提示词。
+5. 属性事实中的 value 必须原样保留其医学含义，不得自行改写剂量、禁忌或用法。
+6. source 为空时说明“当前图谱未提供出处”，不能编造文献。
+7. 优先直接回答用户询问的属性；存在多条关系或属性时分条列出，
+   每个 Markdown 项目符号必须单独占一行。
 
 <user_question>
 {question}
@@ -245,4 +255,8 @@ def graph_answer_prompt(
 <evidence>
 {evidence_json}
 </evidence>
+
+<attribute_facts>
+{facts_json}
+</attribute_facts>
 """.strip()

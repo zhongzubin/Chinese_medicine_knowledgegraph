@@ -95,6 +95,31 @@ class UsedEntityRef(StrictModel):
     name: str = Field(min_length=1, max_length=100)
 
 
+class AttributeSelection(StrictModel):
+    label: EntityLabel
+    attributes: List[str] = Field(min_length=1)
+
+    @field_validator("attributes")
+    @classmethod
+    def normalize_attributes(cls, values: List[str]) -> List[str]:
+        normalized = []
+        for value in values:
+            value = value.strip()
+            if not value:
+                raise ValueError("属性名不能为空")
+            if value not in normalized:
+                normalized.append(value)
+        if not normalized:
+            raise ValueError("至少需要一个属性")
+        return normalized
+
+
+class AttributeQueryPlan(StrictModel):
+    used_entities: List[UsedEntityRef] = Field(min_length=1)
+    selections: List[AttributeSelection] = Field(min_length=1)
+    expected_result_shape: Literal["attribute_values"] = "attribute_values"
+
+
 class ConversationTurn(StrictModel):
     question: str = Field(min_length=1, max_length=500)
     answer: str = Field(min_length=1, max_length=10000)
@@ -171,6 +196,15 @@ class Evidence(StrictModel):
     source: Optional[str] = None
 
 
+class AttributeFact(StrictModel):
+    subject: str = Field(min_length=1, max_length=100)
+    subject_label: EntityLabel
+    attribute: str = Field(min_length=1, max_length=80)
+    attribute_label: str = Field(min_length=1, max_length=80)
+    value: str = Field(min_length=1, max_length=4000)
+    source: Optional[str] = Field(default=None, max_length=1000)
+
+
 class ErrorInfo(StrictModel):
     code: ErrorCode
     message: str
@@ -186,6 +220,7 @@ class GraphQAResponse(StrictModel):
     linked_entities: List[LinkedEntity] = Field(default_factory=list)
     query: Optional[QueryInfo] = None
     evidence: List[Evidence] = Field(default_factory=list)
+    facts: List[AttributeFact] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     error: Optional[ErrorInfo] = None
     session_id: Optional[str] = None
@@ -196,6 +231,7 @@ class GraphQAStreamEvent(StrictModel):
     event: Literal[
         "stage",
         "evidence",
+        "facts",
         "answer_delta",
         "warning",
         "error",

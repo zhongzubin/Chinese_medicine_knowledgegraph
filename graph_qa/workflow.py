@@ -4,7 +4,7 @@
 import re
 import unicodedata
 import uuid
-from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
@@ -14,6 +14,9 @@ from graph_qa.cypher_guard import CypherGuard, CypherGuardError, detect_unsafe_q
 from graph_qa.entity_linker import EntityIndex
 from graph_qa.llm import QAReasoner, ReasonerError
 from graph_qa.models import (
+    AttributeFact,
+    AttributeQueryPlan,
+    AttributeSelection,
     ConversationTurn,
     CypherPlan,
     ErrorCode,
@@ -26,7 +29,7 @@ from graph_qa.models import (
     append_disclaimer,
 )
 from graph_qa.neo4j_repository import RepositoryError
-from graph_qa.schema import GraphSchema
+from graph_qa.schema import ATTRIBUTE_DISPLAY_NAMES, GraphSchema
 from graph_qa.state import AgentState
 
 WHITESPACE_RE = re.compile(r"\s+")
@@ -37,6 +40,65 @@ CLARIFY_ANSWER = (
     "请补充药材、方剂、疾病、症状、功效或文献名称后再试。"
 )
 SAFE_RETRY_ANSWER = "未能生成符合只读安全规则的图谱查询，请换一种更具体的问法。"
+
+ATTRIBUTE_TERM_MAP: Tuple[Tuple[Tuple[str, ...], Tuple[str, ...]], ...] = (
+    (("性味", "四气", "五味", "药性", "寒热温凉"), ("property_flavor",)),
+    (("归经", "入哪经", "经络"), ("meridian",)),
+    (("用量", "剂量", "多少克", "吃多少", "服多少"), ("dosage",)),
+    (("禁忌", "忌服", "不宜", "注意事项", "不能吃", "不能服"), ("taboo",)),
+    (
+        (
+            "用法",
+            "怎么用",
+            "如何服",
+            "怎么服",
+            "如何服用",
+            "怎么服用",
+            "煎服",
+            "服用方法",
+            "怎么吃",
+        ),
+        ("usage",),
+    ),
+    (("功效", "作用", "有什么效果"), ("effect",)),
+    (("主治", "治什么", "治疗什么", "适应证"), ("indication",)),
+    (("产地", "哪里产"), ("place",)),
+    (("炮制", "怎么炮制"), ("processing",)),
+    (("性状", "外观"), ("traits",)),
+    (("别名", "又叫什么", "别称"), ("alias",)),
+)
+RELATION_FALLBACK_ATTRIBUTES = frozenset({"effect", "indication"})
+RELATION_TERM_MAP: Tuple[Tuple[Tuple[str, ...], str], ...] = (
+    (
+        ("组成", "成分", "含有", "包含", "由哪些药材"),
+        "HAS_INGREDIENT",
+    ),
+    (("缓解", "改善"), "ALLEVIATES_SYMPTOM"),
+    (("治疗", "主治", "治什么", "能治"), "TREATS_DISEASE"),
+    (("功效", "作用", "效果"), "HAS_EFFECT"),
+    (("症状", "体征", "表现"), "HAS_SYMPTOM"),
+    (("出处", "来源", "文献", "出自", "来自"), "FROM_SOURCE"),
+)
+ENTITY_HINT_MAP: Tuple[Tuple[Tuple[str, ...], str], ...] = (
+    (("方剂",), "Formula"),
+    (("药材", "中药"), "Herb"),
+    (("疾病", "病证"), "Disease"),
+    (("症状", "体征"), "Symptom"),
+    (("功效", "作用"), "Effect"),
+    (("文献", "出处", "来源", "典籍"), "Source"),
+)
+CONTEXT_PRONOUNS = (
+    "这个方剂",
+    "该方剂",
+    "这个药",
+    "这种药",
+    "该药",
+    "这个病",
+    "这种病",
+    "这个症状",
+    "该症状",
+    "它",
+)
 
 STAGE_LABELS = {
     "normalize": "规范化问题",
@@ -49,6 +111,7 @@ STAGE_LABELS = {
     "validate_cypher": "校验查询安全",
     "execute_cypher": "执行图谱查询",
     "answer_from_graph": "生成图谱回答",
+    "verify_answer": "校验答案",
     "direct_answer": "生成直接回答",
     "clarify": "请求补充实体",
     "no_evidence": "确认无图谱依据",
@@ -67,8 +130,7 @@ def evidence_from_rows(
     schema: GraphSchema,
 ) -> List[Evidence]:
     """只把固定证据字段转换为 Evidence，无法验证的行直接丢弃。"""
-    evidence: List[Evidence] = []
-    seen: Set[Tuple[str, str, str, str, str, Optional[str]]] = set()
+    evidence_by_key: Dict[Tuple[str, str, str, str, str], Evidence] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -96,13 +158,10 @@ def evidence_from_rows(
             relationship,
             object_name,
             object_label,
-            normalized_source,
         )
-        if key in seen:
-            continue
-        seen.add(key)
-        evidence.append(
-            Evidence(
+        existing = evidence_by_key.get(key)
+        if existing is None:
+            evidence_by_key[key] = Evidence(
                 subject=subject.strip(),
                 subject_label=subject_label,
                 relationship=relationship,
@@ -110,8 +169,20 @@ def evidence_from_rows(
                 object_label=object_label,
                 source=normalized_source,
             )
+            continue
+        if normalized_source is None:
+            continue
+        existing_sources = (
+            existing.source.split("；")
+            if existing.source
+            else []
         )
-    return evidence
+        if normalized_source not in existing_sources:
+            existing_sources.append(normalized_source)
+            evidence_by_key[key] = existing.model_copy(
+                update={"source": "；".join(existing_sources)}
+            )
+    return list(evidence_by_key.values())
 
 
 def _evidence_fallback_answer(evidence: Sequence[Evidence]) -> str:
@@ -165,6 +236,291 @@ def _active_question(state: AgentState) -> str:
     return state.get("rewritten_question") or state["normalized_question"]
 
 
+def _requested_attributes(question: str) -> List[str]:
+    requested: List[str] = []
+    for terms, attributes in ATTRIBUTE_TERM_MAP:
+        if not any(term in question for term in terms):
+            continue
+        for attribute in attributes:
+            if attribute not in requested:
+                requested.append(attribute)
+    return requested
+
+
+def _looks_context_dependent(question: str) -> bool:
+    if any(pronoun in question for pronoun in CONTEXT_PRONOUNS):
+        return True
+    if (
+        _requested_attributes(question)
+        and len(question) <= 20
+        and not any(term in question for term in ("吗", "什么", "是不是"))
+    ):
+        return True
+    return question in {"还有呢？", "还有呢?", "为什么？", "为什么?"}
+
+
+def _requested_relations(question: str) -> Set[str]:
+    return {
+        relation
+        for terms, relation in RELATION_TERM_MAP
+        if any(term in question for term in terms)
+    }
+
+
+def _entity_hints(question: str) -> Set[str]:
+    return {
+        label
+        for terms, label in ENTITY_HINT_MAP
+        if any(term in question for term in terms)
+    }
+
+
+def _relationship_direction_hint(
+    question: str,
+    linked_entities: Sequence[Any],
+    relation: str,
+) -> Optional[str]:
+    relation_positions = [
+        question.find(term)
+        for terms, requested_relation in RELATION_TERM_MAP
+        if requested_relation == relation
+        for term in terms
+        if term in question
+    ]
+    entity_positions = [
+        question.find(token)
+        for entity in linked_entities
+        for token in (entity.matched_text, entity.name)
+        if token and token in question
+    ]
+    if not relation_positions or not entity_positions:
+        return None
+    return (
+        "forward"
+        if min(entity_positions) < min(relation_positions)
+        else "reverse"
+    )
+
+
+def _fact_value_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (bool, int, float)):
+        return str(value)
+    if isinstance(value, (list, tuple, set)):
+        parts = [_fact_value_text(item) for item in value]
+        return "、".join(part for part in parts if part)
+    if isinstance(value, Mapping):
+        parts = [
+            f"{key}: {_fact_value_text(item)}"
+            for key, item in value.items()
+            if _fact_value_text(item)
+        ]
+        return "；".join(parts)
+    return str(value).strip()
+
+
+def facts_from_rows(
+    rows: Sequence[dict],
+    plan: AttributeQueryPlan,
+) -> List[AttributeFact]:
+    selections = {
+        selection.label: set(selection.attributes)
+        for selection in plan.selections
+    }
+    used_keys = {(item.label, item.name) for item in plan.used_entities}
+    facts: List[AttributeFact] = []
+    seen: Set[Tuple[str, str, str, str, Optional[str]]] = set()
+    for row in rows:
+        subject = row.get("subject")
+        subject_label = row.get("subject_label")
+        properties = row.get("properties")
+        if (
+            not isinstance(subject, str)
+            or not isinstance(subject_label, str)
+            or not isinstance(properties, Mapping)
+            or (subject_label, subject) not in used_keys
+            or subject_label not in selections
+        ):
+            continue
+        sources = row.get("sources")
+        source = None
+        if isinstance(sources, list):
+            source_names = [
+                item.strip()
+                for item in sources
+                if isinstance(item, str) and item.strip()
+            ]
+            source = "；".join(source_names) or None
+        for attribute in selections[subject_label]:
+            value = _fact_value_text(properties.get(attribute))[:4000]
+            if not value:
+                continue
+            key = (subject, subject_label, attribute, value, source)
+            if key in seen:
+                continue
+            seen.add(key)
+            facts.append(
+                AttributeFact(
+                    subject=subject,
+                    subject_label=subject_label,
+                    attribute=attribute,
+                    attribute_label=ATTRIBUTE_DISPLAY_NAMES.get(
+                        attribute,
+                        attribute,
+                    ),
+                    value=value,
+                    source=source,
+                )
+            )
+    return facts
+
+
+def _answer_supported_by_context(
+    answer: str,
+    evidence: Sequence[Evidence],
+    facts: Sequence[AttributeFact],
+) -> bool:
+    normalized_answer = normalize_question(answer)
+    candidates: Set[str] = set()
+    for item in evidence:
+        candidates.add(item.object)
+    for item in facts:
+        candidates.add(item.value)
+        candidates.update(
+            part.strip()
+            for part in re.split(r"[\s，,、；;。]+", item.value)
+            if part.strip()
+        )
+    return any(
+        len(candidate) >= 2 and candidate in normalized_answer
+        for candidate in candidates
+    )
+
+
+def facts_match_used_entities(
+    facts: Sequence[AttributeFact],
+    used_entities: Sequence[Any],
+) -> bool:
+    used_keys = {(item.label, item.name) for item in used_entities}
+    return bool(facts) and all(
+        (item.subject_label, item.subject) in used_keys
+        for item in facts
+    )
+
+
+def _context_fallback_answer(
+    evidence: Sequence[Evidence],
+    facts: Sequence[AttributeFact],
+) -> str:
+    lines = ["根据当前图谱中可验证的信息："]
+    for item in facts[:8]:
+        source = f"（来源：{item.source}）" if item.source else "（未提供出处）"
+        lines.append(
+            f"- {item.subject}的{item.attribute_label}：{item.value}{source}"
+        )
+    for item in evidence[:8]:
+        source = f"（来源：{item.source}）" if item.source else "（未提供出处）"
+        lines.append(
+            f"- {item.subject} 通过 {item.relationship} 关联到 "
+            f"{item.object}{source}"
+        )
+    return "\n".join(lines)
+
+
+def _normalize_answer_formatting(
+    answer: str,
+    facts: Sequence[AttributeFact] = (),
+) -> str:
+    """修复模型把 Markdown 项目符号挤在句末的可读性问题。"""
+    normalized = re.sub(
+        r"(?<=[：:。；;])\s*-\s*(?=\S)",
+        "\n- ",
+        answer,
+    )
+    for label in {
+        item.attribute_label
+        for item in facts
+        if item.attribute_label
+    }:
+        escaped = re.escape(label)
+        normalized = re.sub(
+            rf"[-•]\s*(?:\*\*)?{escaped}(?:\*\*)?\s*[：:]",
+            f"\n{label}：",
+            normalized,
+        )
+        normalized = re.sub(
+            rf"(?<=[。；;])\s*(?:\*\*)?{escaped}(?:\*\*)?\s*[：:]",
+            f"\n{label}：",
+            normalized,
+        )
+        normalized = re.sub(
+            rf"\n\n(?={escaped}：)",
+            "\n",
+            normalized,
+        )
+    return normalized.strip()
+
+
+def _recent_contextual_question(
+    question: str,
+    history: Sequence[ConversationTurn],
+) -> Optional[str]:
+    if not history:
+        return None
+    recent_entities = next(
+        (
+            turn.linked_entities
+            for turn in reversed(history)
+            if turn.linked_entities
+        ),
+        [],
+    )
+    if not recent_entities:
+        return None
+
+    preferred_label = None
+    pronoun = None
+    for candidate, label in (
+        ("这个方剂", "Formula"),
+        ("该方剂", "Formula"),
+        ("这个药", "Herb"),
+        ("这种药", "Herb"),
+        ("该药", "Herb"),
+        ("这个病", "Disease"),
+        ("这种病", "Disease"),
+        ("这个症状", "Symptom"),
+        ("该症状", "Symptom"),
+        ("它", None),
+    ):
+        if candidate in question:
+            pronoun = candidate
+            preferred_label = label
+            break
+
+    if pronoun is None and _requested_attributes(question) and len(question) <= 20:
+        pronoun = ""
+
+    if pronoun is None:
+        return None
+
+    candidates = [
+        item
+        for item in recent_entities
+        if preferred_label is None or item.label == preferred_label
+    ]
+    unique_names = {item.name for item in candidates}
+    if len(unique_names) != 1:
+        return None
+    entity_name = next(iter(unique_names))
+    resolved = question.replace(pronoun, entity_name, 1) if pronoun else (
+        f"{entity_name}{question}"
+    )
+    return normalize_question(resolved)
+
+
 def _emit_stream_event(event: str, data: Dict[str, Any]) -> None:
     try:
         get_stream_writer()({"event": event, "data": data})
@@ -215,6 +571,7 @@ class GraphQAEngine:
         builder.add_node("validate_cypher", self._validate_cypher)
         builder.add_node("execute_cypher", self._execute_cypher)
         builder.add_node("answer_from_graph", self._answer_from_graph)
+        builder.add_node("verify_answer", self._verify_answer)
         builder.add_node("direct_answer", self._direct_answer)
         builder.add_node("clarify", self._clarify)
         builder.add_node("no_evidence", self._no_evidence)
@@ -267,12 +624,14 @@ class GraphQAEngine:
             {
                 "answer_from_graph": "answer_from_graph",
                 "no_evidence": "no_evidence",
+                "plan_cypher": "plan_cypher",
                 "finish": "finish",
             },
         )
+        builder.add_edge("answer_from_graph", "verify_answer")
 
         for terminal_node in (
-            "answer_from_graph",
+            "verify_answer",
             "direct_answer",
             "clarify",
             "no_evidence",
@@ -340,7 +699,15 @@ class GraphQAEngine:
     def _rewrite_question(self, state: AgentState) -> Dict[str, Any]:
         question = state["normalized_question"]
         history = state.get("conversation_history", [])
-        if not history:
+        explicit_entities = self.entity_index.match_exact(
+            question,
+            limit_per_label=self.entity_limit,
+        )
+        if (
+            not history
+            or explicit_entities
+            or not _looks_context_dependent(question)
+        ):
             return {
                 "rewritten_question": question,
                 "stage_events": ["rewrite_question"],
@@ -364,6 +731,15 @@ class GraphQAEngine:
                 "stage_events": ["rewrite_question"],
             }
         except Exception:
+            contextual = _recent_contextual_question(question, history)
+            if contextual:
+                return {
+                    "rewritten_question": contextual,
+                    "warnings": [
+                        "对话改写模型不可用，已使用最近有效实体补全问题。"
+                    ],
+                    "stage_events": ["rewrite_question"],
+                }
             return {
                 "rewritten_question": question,
                 "warnings": ["对话改写不可用，已按当前问题继续处理。"],
@@ -452,9 +828,217 @@ class GraphQAEngine:
             "stage_events": ["link_entities"],
         }
 
+    def _build_attribute_plan(
+        self,
+        state: AgentState,
+    ) -> Optional[AttributeQueryPlan]:
+        if state.get("attribute_query_attempted"):
+            return None
+        requested = set(_requested_attributes(_active_question(state)))
+        if not requested:
+            return None
+
+        used_entities = []
+        selections_by_label: Dict[str, Set[str]] = {}
+        for entity in state.get("linked_entities", []):
+            queryable = set(self.schema.queryable_attributes(entity.label))
+            selected = requested & queryable
+            if not selected:
+                continue
+            used_entities.append(
+                {
+                    "label": entity.label,
+                    "name": entity.name,
+                }
+            )
+            selections_by_label.setdefault(entity.label, set()).update(selected)
+        if not used_entities:
+            return None
+        return AttributeQueryPlan(
+            used_entities=used_entities,
+            selections=[
+                AttributeSelection(
+                    label=label,
+                    attributes=sorted(attributes),
+                )
+                for label, attributes in sorted(selections_by_label.items())
+            ],
+        )
+
+    def _build_relationship_template_plan(
+        self,
+        state: AgentState,
+    ) -> Optional[CypherPlan]:
+        question = _active_question(state)
+        requested_relations = _requested_relations(question)
+        if not requested_relations:
+            return None
+        hints = _entity_hints(question)
+        all_linked_entities = state.get("linked_entities", [])
+        linked_by_label: Dict[str, List[Any]] = {}
+        for entity in all_linked_entities:
+            linked_by_label.setdefault(entity.label, []).append(entity)
+
+        candidates: List[Tuple[int, CypherPlan]] = []
+        for subject_label, relation, object_label in self.schema.triple_patterns:
+            if relation not in requested_relations:
+                continue
+            direction_hint = _relationship_direction_hint(
+                question,
+                all_linked_entities,
+                relation,
+            )
+            subject_entities = linked_by_label.get(subject_label, [])
+            object_entities = linked_by_label.get(object_label, [])
+
+            if subject_entities:
+                score = 1
+                if object_label in hints:
+                    score += 4
+                if hints and subject_label in hints and object_label not in hints:
+                    score -= 2
+                if direction_hint == "forward":
+                    score += 5
+                elif direction_hint == "reverse":
+                    score -= 5
+                candidates.append(
+                    (
+                        score,
+                        self._relationship_template(
+                            subject_label,
+                            relation,
+                            object_label,
+                            subject_entities,
+                            reverse=False,
+                        ),
+                    )
+                )
+            if object_entities:
+                score = 1
+                if subject_label in hints:
+                    score += 4
+                if hints and object_label in hints and subject_label not in hints:
+                    score -= 2
+                if any(marker in question for marker in ("哪些", "什么")):
+                    score += 1
+                if direction_hint == "reverse":
+                    score += 5
+                elif direction_hint == "forward":
+                    score -= 5
+                candidates.append(
+                    (
+                        score,
+                        self._relationship_template(
+                            subject_label,
+                            relation,
+                            object_label,
+                            object_entities,
+                            reverse=True,
+                        ),
+                    )
+                )
+
+        if not candidates:
+            return None
+        best_score = max(score for score, _plan in candidates)
+        best = [
+            plan
+            for score, plan in candidates
+            if score == best_score
+        ]
+        unique = {
+            (
+                plan.expected_result_shape,
+                plan.cypher,
+                tuple(item.label for item in plan.used_entities),
+                tuple(item.name for item in plan.used_entities),
+            ): plan
+            for plan in best
+        }
+        if len(unique) != 1:
+            return None
+        return next(iter(unique.values()))
+
+    def _relationship_template(
+        self,
+        subject_label: str,
+        relation: str,
+        object_label: str,
+        target_entities: Sequence[Any],
+        *,
+        reverse: bool,
+    ) -> CypherPlan:
+        parameter_target = "object" if reverse else "subject"
+        limit = min(20, self.guard.max_results)
+        can_load_source = relation != "FROM_SOURCE" and (
+            subject_label,
+            "FROM_SOURCE",
+            "Source",
+        ) in self.schema.triple_patterns
+        source_match = (
+            "\nOPTIONAL MATCH (subject)-[:FROM_SOURCE]->(source_node:Source)"
+            if can_load_source
+            else ""
+        )
+        source_return = (
+            "source_node.name AS source"
+            if can_load_source
+            else "NULL AS source"
+        )
+        cypher = f"""
+MATCH (subject:{subject_label})-[relationship:{relation}]->(object:{object_label})
+WHERE {parameter_target}.name IN $entity_names
+{source_match}
+RETURN subject.name AS subject,
+       labels(subject)[0] AS subject_label,
+       type(relationship) AS relationship,
+       object.name AS object,
+       labels(object)[0] AS object_label,
+       {source_return}
+LIMIT {limit}
+""".strip()
+        names = sorted({entity.name for entity in target_entities})
+        return CypherPlan(
+            cypher=cypher,
+            parameters={"entity_names": names},
+            used_entities=[
+                {
+                    "label": entity.label,
+                    "name": entity.name,
+                }
+                for entity in sorted(
+                    target_entities,
+                    key=lambda item: (item.label, item.name),
+                )
+            ],
+            expected_result_shape=(
+                f"{subject_label.lower()}_{relation.lower()}_"
+                f"{object_label.lower()}"
+            ),
+        )
+
     def _plan_cypher(self, state: AgentState) -> Dict[str, Any]:
-        attempts = state.get("query_attempts", 0) + 1
         linked_entities = state.get("linked_entities", [])
+        attribute_plan = self._build_attribute_plan(state)
+        if attribute_plan is not None:
+            return {
+                "attribute_plan": attribute_plan,
+                "attribute_query_attempted": True,
+                "attribute_relation_fallback": False,
+                "cypher_plan": None,
+                "query_attempts": state.get("query_attempts", 0),
+                "stage_events": ["plan_cypher"],
+            }
+        template_plan = self._build_relationship_template_plan(state)
+        if template_plan is not None:
+            return {
+                "attribute_plan": None,
+                "attribute_relation_fallback": False,
+                "cypher_plan": template_plan,
+                "query_attempts": state.get("query_attempts", 0),
+                "stage_events": ["plan_cypher"],
+            }
+        attempts = state.get("query_attempts", 0) + 1
         try:
             plan = self.reasoner.generate_cypher(
                 _active_question(state),
@@ -486,6 +1070,8 @@ class GraphQAEngine:
                     "stage_events": ["plan_cypher"],
                 }
             return {
+                "attribute_plan": None,
+                "attribute_relation_fallback": False,
                 "cypher_plan": plan,
                 "query_attempts": attempts,
                 "stage_events": ["plan_cypher"],
@@ -508,6 +1094,36 @@ class GraphQAEngine:
             }
 
     def _validate_cypher(self, state: AgentState) -> Dict[str, Any]:
+        attribute_plan = state.get("attribute_plan")
+        if attribute_plan is not None:
+            try:
+                selected_by_label = {
+                    selection.label: set(selection.attributes)
+                    for selection in attribute_plan.selections
+                }
+                for entity in attribute_plan.used_entities:
+                    allowed = set(
+                        self.schema.queryable_attributes(entity.label)
+                    )
+                    requested = selected_by_label.get(entity.label, set())
+                    if not requested or not requested.issubset(allowed):
+                        raise ValueError("属性查询不在白名单")
+            except Exception:
+                return {
+                    "attribute_plan": None,
+                    "is_cypher_valid": False,
+                    "validation_errors": [
+                        f"{ErrorCode.CYPHER_REJECTED.value}: "
+                        "属性查询包含未允许的字段"
+                    ],
+                    "last_error_code": ErrorCode.CYPHER_REJECTED.value,
+                    "stage_events": ["validate_cypher"],
+                }
+            return {
+                "is_cypher_valid": True,
+                "stage_events": ["validate_cypher"],
+            }
+
         plan = state.get("cypher_plan")
         if plan is None:
             return {
@@ -547,6 +1163,58 @@ class GraphQAEngine:
         }
 
     def _execute_cypher(self, state: AgentState) -> Dict[str, Any]:
+        attribute_plan = state.get("attribute_plan")
+        if attribute_plan is not None:
+            try:
+                result = self.repository.execute_attributes(attribute_plan)
+            except RepositoryError as exc:
+                return self._terminal_error(
+                    state,
+                    exc.code,
+                    exc.message,
+                    "图谱查询失败，请稍后重试。",
+                    "execute_cypher",
+                )
+            except Exception:
+                return self._terminal_error(
+                    state,
+                    ErrorCode.QUERY_EXECUTION_FAILED,
+                    "属性查询发生内部错误",
+                    "图谱查询失败，请稍后重试。",
+                    "execute_cypher",
+                )
+
+            facts = facts_from_rows(result.rows, attribute_plan)
+            update: Dict[str, Any] = {
+                "query_result": result,
+                "evidence": [],
+                "facts": facts,
+                "stage_events": ["execute_cypher"],
+            }
+            requested_attributes = {
+                attribute
+                for selection in attribute_plan.selections
+                for attribute in selection.attributes
+            }
+            if (
+                not facts
+                and requested_attributes
+                and requested_attributes.issubset(
+                    RELATION_FALLBACK_ATTRIBUTES
+                )
+            ):
+                update.update(
+                    {
+                        "attribute_plan": None,
+                        "attribute_relation_fallback": True,
+                        "query_result": None,
+                        "warnings": [
+                            "属性字段没有可用值，已尝试通过图谱关系回答。"
+                        ],
+                    }
+                )
+            return update
+
         plan = state.get("cypher_plan")
         if plan is None:
             return self._terminal_error(
@@ -580,6 +1248,7 @@ class GraphQAEngine:
         update: Dict[str, Any] = {
             "query_result": result,
             "evidence": target_evidence,
+            "facts": [],
             "stage_events": ["execute_cypher"],
         }
         if result.rows and not target_evidence:
@@ -596,13 +1265,28 @@ class GraphQAEngine:
 
     def _answer_from_graph(self, state: AgentState) -> Dict[str, Any]:
         evidence = state.get("evidence", [])
+        facts = state.get("facts", [])
         query_result = state.get("query_result")
         plan = state.get("cypher_plan")
-        if (
-            not evidence
-            or query_result is None
-            or plan is None
-            or not evidence_matches_used_entities(evidence, plan.used_entities)
+        attribute_plan = state.get("attribute_plan")
+        relation_context_valid = bool(
+            evidence
+            and plan is not None
+            and evidence_matches_used_entities(
+                evidence,
+                plan.used_entities,
+            )
+        )
+        attribute_context_valid = bool(
+            facts
+            and attribute_plan is not None
+            and facts_match_used_entities(
+                facts,
+                attribute_plan.used_entities,
+            )
+        )
+        if query_result is None or not (
+            relation_context_valid or attribute_context_valid
         ):
             return self._terminal_error(
                 state,
@@ -611,6 +1295,16 @@ class GraphQAEngine:
                 NO_EVIDENCE_ANSWER,
                 "answer_from_graph",
             )
+        if facts and not evidence:
+            answer = append_disclaimer(
+                _context_fallback_answer([], facts)
+            )
+            _emit_answer_delta(answer)
+            return {
+                "answer": answer,
+                "grounded": True,
+                "stage_events": ["answer_from_graph"],
+            }
         parts: List[str] = []
 
         def on_token(token: str) -> None:
@@ -626,6 +1320,7 @@ class GraphQAEngine:
                     state.get("linked_entities", []),
                     query_result.rows,
                     evidence,
+                    facts,
                     on_token,
                 )
                 answer = "".join(parts) or streamed
@@ -635,9 +1330,12 @@ class GraphQAEngine:
                     state.get("linked_entities", []),
                     query_result.rows,
                     evidence,
+                    facts,
                 )
                 _emit_answer_delta(answer)
-            final_answer = append_disclaimer(answer)
+            final_answer = append_disclaimer(
+                _normalize_answer_formatting(answer, facts)
+            )
             emitted = "".join(parts)
             if final_answer.startswith(emitted):
                 _emit_answer_delta(final_answer[len(emitted) :])
@@ -648,7 +1346,9 @@ class GraphQAEngine:
             }
         except Exception:
             if parts:
-                final_answer = append_disclaimer("".join(parts))
+                final_answer = append_disclaimer(
+                    _normalize_answer_formatting("".join(parts), facts)
+                )
                 _emit_answer_delta(final_answer[len("".join(parts)) :])
                 return {
                     "answer": final_answer,
@@ -657,6 +1357,10 @@ class GraphQAEngine:
                     "stage_events": ["answer_from_graph"],
                 }
             fallback = append_disclaimer(_evidence_fallback_answer(evidence))
+            if facts:
+                fallback = append_disclaimer(
+                    _context_fallback_answer(evidence, facts)
+                )
             _emit_answer_delta(fallback)
             return {
                 "answer": fallback,
@@ -664,6 +1368,33 @@ class GraphQAEngine:
                 "warnings": ["回答生成模型不可用，已使用图谱证据生成简化回答。"],
                 "stage_events": ["answer_from_graph"],
             }
+
+    def _verify_answer(self, state: AgentState) -> Dict[str, Any]:
+        answer = state.get("answer", "").strip()
+        evidence = state.get("evidence", [])
+        facts = state.get("facts", [])
+        if not answer or not _answer_supported_by_context(
+            answer,
+            evidence,
+            facts,
+        ):
+            fallback = append_disclaimer(
+                _context_fallback_answer(evidence, facts)
+            )
+            return {
+                "answer": fallback,
+                "grounded": True,
+                "warnings": [
+                    "回答模型输出的内容未能完整对应本轮证据，"
+                    "已改为证据化回答。"
+                ],
+                "stage_events": ["verify_answer"],
+            }
+        return {
+            "answer": answer,
+            "grounded": True,
+            "stage_events": ["verify_answer"],
+        }
 
     def _direct_answer(self, state: AgentState) -> Dict[str, Any]:
         parts: List[str] = []
@@ -792,10 +1523,14 @@ class GraphQAEngine:
     def _route_after_execute(state: AgentState) -> str:
         if state.get("error_code"):
             return "finish"
+        if state.get("attribute_relation_fallback"):
+            return "plan_cypher"
+        if state.get("facts") or state.get("evidence"):
+            return "answer_from_graph"
         result = state.get("query_result")
         if result is None or result.row_count == 0:
             return "no_evidence"
-        return "answer_from_graph"
+        return "no_evidence"
 
     def _initial_state(
         self,
@@ -819,8 +1554,12 @@ class GraphQAEngine:
             "entity_candidates": [],
             "evidence": [],
             "intent": None,
+            "attribute_plan": None,
+            "attribute_query_attempted": False,
+            "attribute_relation_fallback": False,
             "cypher_plan": None,
             "query_result": None,
+            "facts": [],
             "error_code": None,
             "error_message": None,
             "last_error_code": None,
@@ -881,6 +1620,7 @@ class GraphQAEngine:
                 else None
             ),
             evidence=final_state.get("evidence", []),
+            facts=final_state.get("facts", []),
             warnings=final_state.get("warnings", []),
             error=err,
             session_id=session_id,
@@ -959,6 +1699,17 @@ class GraphQAEngine:
                                     "items": [
                                         item.model_dump(mode="json")
                                         for item in evidence
+                                    ]
+                                },
+                            )
+                        facts = update.get("facts", [])
+                        if facts:
+                            yield GraphQAStreamEvent(
+                                event="facts",
+                                data={
+                                    "items": [
+                                        item.model_dump(mode="json")
+                                        for item in facts
                                     ]
                                 },
                             )

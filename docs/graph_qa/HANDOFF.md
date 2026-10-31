@@ -2,7 +2,7 @@
 
 > 代码基线：`7be7f3d`
 >
-> 交接日期：2026-10-29
+> 交接日期：2026-10-30
 >
 > 当前分支：`main`
 
@@ -26,6 +26,7 @@
 | M3 5 轮会话、FAISS、SSE | 已完成 |
 | M4 Streamlit | 已完成并通过真实浏览器测试 |
 | 本地演示版 | 已完成；一键启动/停止和真实浏览器验收通过 |
+| 专业问答质量 v1 | 首轮已完成；属性、确定性查询、多轮和答案支持校验通过 |
 | M5 微调/部署增强 | 未开始 |
 
 明确不在当前范围：
@@ -37,7 +38,7 @@
 
 ## 3. 已实现架构
 
-LangGraph 当前包含 15 个节点，主要流程：
+LangGraph 当前包含 16 个节点，主要流程：
 
 ```text
 规范化
@@ -47,10 +48,11 @@ LangGraph 当前包含 15 个节点，主要流程：
   -> 精确名称/别名匹配
      -> 高置信 fuzzy
      -> FAISS Top-3 + 阈值
-  -> Schema 约束 Cypher
+  -> 属性模板 / 唯一方向关系模板 / Schema 约束 Cypher
   -> Guard / EXPLAIN
   -> Neo4j 只读查询
-  -> 流式答案 + 证据
+  -> 属性事实 + 关系证据
+  -> 流式答案 + 证据支持校验
 ```
 
 实体匹配顺序不能随意改成“语义优先”。真实测试中，“麻黄草”的 fuzzy 能正确命中麻黄，而 BGE 语义 Top-1 曾误排为天麻；当前策略是词形高置信匹配置信度高于语义召回。
@@ -69,6 +71,7 @@ SSE 是单向的服务端到客户端流，客户端先发送一次普通 POST �
 
 - `stage`
 - `evidence`
+- `facts`
 - `answer_delta`
 - `warning`
 - `error`
@@ -111,7 +114,7 @@ models/bge-large-zh-v1.5
 
 | 文件 | 作用 |
 | --- | --- |
-| `graph_qa/workflow.py` | 15 节点 LangGraph 工作流、改写、SSE 事件 |
+| `graph_qa/workflow.py` | 16 节点 LangGraph 工作流、改写、SSE 事件 |
 | `graph_qa/entity_linker.py` | 精确、fuzzy 和语义召回融合 |
 | `graph_qa/semantic_index.py` | BGE 编码、FAISS 和索引缓存 |
 | `graph_qa/session_store.py` | Redis 会话、TTL、删除和会话锁 |
@@ -120,6 +123,9 @@ models/bge-large-zh-v1.5
 | `graph_qa/api_security.py` | 多 API Key 配置和校验 |
 | `graph_qa/streamlit_app.py` | Streamlit 双栏客户端 |
 | `evaluation/qa_cases.jsonl` | 120 条黄金问题 |
+| `evaluation/product_quality_cases.jsonl` | 10 条属性产品集 |
+| `evaluation/multi_turn_cases.jsonl` | 20 组 60 轮多轮固定集 |
+| `graph_qa/multi_turn_evaluate.py` | 多轮固定集评测入口 |
 
 ## 8. 必要配置
 
@@ -152,13 +158,15 @@ uv run streamlit run graph_qa/streamlit_app.py
 
 ## 9. 验证基线
 
-- 当前全量 pytest：`141 passed, 5 skipped`。
-- 真实 Neo4j + 模型集成：通过。
-- Redis 限流、并发、会话集成：通过。
-- 真实跨实例 SSE 会话：通过。
+- 当前全量 pytest：`166 passed, 5 skipped`。
+- 真实 Neo4j + 模型集成：本地演示和历史验收已通过；本轮默认 pytest 中按配置跳过。
+- Redis 限流、并发、会话集成：历史验收已通过；本轮默认 pytest 中按配置跳过。
+- 真实跨实例 SSE 会话：历史验收已通过；本轮未重跑。
 - 120 条黄金集完整工作流 outcome：`116/120`。
-- 纯召回 Recall@3：`100%`；完整工作流实体 Recall@3：`96.67%`。
-- 未知实体误召回率：`13.33%`；semantic 路径 Recall@3：`85%`。
+- 纯召回 Recall@3：`100%`；完整工作流实体 Recall@3：`98.89%`。
+- 未知实体误召回率：`13.33%`；完整工作流 semantic 路径 Recall@3：`95%`。
+- 属性产品集：10/10 grounded，属性事实匹配率 100%。
+- 多轮固定集：20 组 60 轮，outcome 和实体匹配均为 100%。
 - 修复前基线：[retrieval-evaluation-2026-10-28.md](retrieval-evaluation-2026-10-28.md)。
 - 本轮修复记录：[retrieval-boundary-fix-2026-10-28.md](retrieval-boundary-fix-2026-10-28.md)。
 - 验收门槛记录：[evaluation-acceptance-2026-10-28.md](evaluation-acceptance-2026-10-28.md)。
@@ -176,11 +184,16 @@ uv run python -m pytest tests/ -v
 
 ## 10. 已知限制
 
-- 120 条黄金集仍不足以代表开放用户表达；semantic 路径完整工作流 Recall@3 为 85%。
+- 120 条黄金集仍不足以代表开放用户表达；semantic 路径完整工作流 Recall@3 为 95%。
 - `0.56` 阈值仍有 2 条低分 semantic 未知实体误召回，需后续单独校准。
 - 长未知词子串、通用词语义候选和无关证据 grounded 已完成首轮修复。
 - 属性级 Effect 候选仍可能被 Disease、Symptom 或通用部位词抢占。
+- 属性查询已进入回答上下文；当前覆盖白名单属性、一跳正向和唯一方向反向关系，基础聚合和复杂多跳仍未实现。
 - 当前没有显式 `no_evidence` 黄金样本，空结果诚实率标记为未评估。
+- Redis 5 轮会话已通过 20 组、60 轮固定集；更长上下文和跨端用户身份仍不在当前范围。
+- 新会话初始化和失败轮次会话 ID 问题已修复。
+- 答案支持检查是确定性启发式，尚未完成大规模人工事实审核。
+- 属性产品集目前 10 条，总产品评测集尚未达到 200 条目标。
 - 本地演示一次上下文追问完整等待约 70 秒，模型阶段仍有延迟波动。
 - 会话作用域是 API 客户端，不是最终登录用户。
 - 当前本地运行目标为单 worker；每个 worker 会重复加载约 1.3GB BGE 模型。
@@ -194,9 +207,12 @@ uv run python -m pytest tests/ -v
 - 边界与 grounded 修复提交：`c99cb6d`。
 - 验收门槛提交：`688d868`。
 - 本地演示版提交：`7be7f3d`（已快进合并到 `main`）。
-- 全量 pytest：`141 passed, 5 skipped`。
-- 真实 120 条 outcome：`116/120`；grounded 证据覆盖率：100%。
+- 全量 pytest：`166 passed, 5 skipped`。
+- 专业问答质量 v1 属性产品集：10/10 grounded，属性事实匹配率 100%。
+- 多轮固定集：20 组、60 轮，outcome 和实体匹配均为 100%。
+- 真实 120 条 outcome：`116/120`；实体 Recall@3：98.89%；grounded 证据覆盖率：100%。
 - Cypher 通过率：100%；查询执行成功率：100%；`acceptance.passed=true`。
+- 专业问答质量 v1 完整记录：[product-quality-validation-2026-10-31.md](product-quality-validation-2026-10-31.md)。
 - 完整逐题 JSON 保存在本地
   `output/graph_qa/evaluation-120-retrieval-boundaries-final-2026-10-28.json`；
   `output/` 被 Git 忽略，不应依赖该文件恢复结论。
@@ -206,49 +222,85 @@ uv run python -m pytest tests/ -v
 - 本地演示一键启动、API/Streamlit 健康检查、浏览器交互和停止脚本均已实测通过。
 - 浏览器已验证问题回答、处理阶段、图谱证据、上下文追问和清空会话。
 - 验收截图：`output/playwright/local-demo-2026-10-29.png`。
+- 新浏览器验收已验证属性区、来源状态和“它有什么禁忌”多轮追问。
+- 新验收截图：`output/playwright/product-quality-final-2026-10-31.png`。
 
 ## 12. 下一步
 
-本地演示版已收口。下一阶段在新对话中开发新的用户可见功能，具体范围等待用户提出。
+本地演示版已完成。专业问答质量 v1 首轮已于 2026-10-31 完成，目标是以真实图谱事实为依据，形成专业、可靠、可核对的中医药知识问答产品。
+
+完整规划见
+[product-quality-roadmap.md](product-quality-roadmap.md)。
 
 当前优先级：
 
-1. 保持本地演示版可运行、可交互。
-2. 新功能沿用现有 FastAPI + Streamlit 契约，不重写前后端。
-3. 每项新功能同步测试、真实浏览器验收和记录。
-4. 内部试用前再补 API 请求级超时、监控和部署。
-5. 公开上线、多用户认证和更广泛评测继续延后。
+1. 扩充到 200 条以上独立产品问题集，并开展答案事实人工抽检。
+2. 设计基础聚合查询和受控多跳查询。
+3. 降低 semantic 误召回和未知实体直接回答。
+4. 补齐真实 Redis/API 跨实例多轮集成验收。
+5. 保持 FastAPI、Streamlit、Redis、LangGraph、Neo4j、BGE + FAISS 和 Cypher Guard 不回归。
+6. 独立 Agent 拓扑在查询和评价契约进一步稳定后启动。
+7. 内部试用、多用户认证、监控和多 worker 继续延后。
 
-### 12.1 下一任务准备说明
+### 12.1 当前质量基线
 
-本地演示任务已完成。新功能开发前需要先明确功能范围、输入输出、数据来源和验收标准；标准及以上任务仍按 AGENTS.md 先提交方案并等待确认。
+- Neo4j 实际有 11,043 个节点和 26,324 条关系。
+- 6 类实体、6 类关系、14 种元数据三元组模式。
+- 当前 120 条评测 outcome 为 116/120。
+- 属性产品集 10/10；多轮固定集 20 组 60 轮全部通过。
+- 原 120 条仍没有显式 `no_evidence` 用例；属性集规模也需继续扩大。
+- `Herb` 中约有 1,466 个性味、1,236 个归经、1,219 个用量和 851 个禁忌字段。
+- `Formula` 中约有 741 个主治、619 个功效字段和 604 个用法字段。
+- 来源关系覆盖：药材 412/2,359，方剂 720/1,020。
 
-建议范围：
+属性事实进入回答上下文的问题已完成首轮修复。下一阶段重点是聚合/多跳、负样本语义边界和 200 条以上独立评测。
 
-- 根据新功能需求确定受影响模块。
-- 保持前后端 JSON 和 SSE 契约兼容，除非新功能明确需要升级。
-- 新增功能必须覆盖单元测试和浏览器交互。
-- 不把内部试用/公开上线工程化工作混入当前本地演示功能。
+### 12.2 多轮上下文范围
 
-验收重点：
+多轮上下文已通过首轮产品固定集。保留 Redis 最近 5 轮存储和会话锁，当前行为包括：
 
-- 本地一键启动和停止仍然可用。
-- 原有问答、证据、会话清空、安全拒绝和 grounded 语义不回归。
-- 全量 pytest 通过；涉及页面时完成真实浏览器验收。
-- 不新增内容生成或多 worker 运行目标。
+- “它、该药、这个方剂”等指代。
+- 无歧义时的省略主语继承。
+- 同一实体上的关系切换。
+- 新明确实体触发的主题切换。
+- 用户纠正实体。
+- 歧义时澄清，不猜测。
+- 失败轮次不污染下一轮。
+- 前端不会保留服务端未成功创建的 `session_id`。
+- 第 6 轮裁剪、TTL、主动清空和跨会话隔离。
 
-回滚方式：
+当前固定集为 20 组、60 轮，outcome 和实体匹配均为 100%。真实 Redis/API 跨实例测试仍需显式启用。
 
-- 本地演示基线合并后从 `main` 创建新功能分支。
-- 出现不可接受回归时回退到本地演示版本或 `18382f6`。
+### 12.3 产品验收重点
+
+- 属性事实能够从图谱进入回答上下文。
+- 关系问答和现有安全边界不回归。
+- grounded 回答引用覆盖率为 100%。
+- 无证据诚实率为 100%。
+- 图谱无来源时必须明确披露。
+- 答案关键事实不得超出本轮证据。
+- 涉及页面时完成真实浏览器多轮交互验证。
+- 全量 pytest 通过，新增属性和多轮测试通过。
+- 不新增内容生成、自动发布或多 worker 运行目标。
+
+### 12.4 实现约束与回滚
+
+- 新增查询模式必须先更新元数据、契约、测试和评测。
+- Text2Cypher 只能作为受控回退，不能替代属性/关系统一证据。
+- 安全校验、只读执行和证据校验保持确定性实现。
+- 独立 Agent 演进放在查询和评价契约稳定之后。
+- 从 `main` 创建独立功能分支。
+- 出现不可接受回归时回退到本地演示基线或 `18382f6`。
 
 ## 13. 新对话建议开场
 
 ```text
 继续开发 D:\code\github-clong\Chinese_medicine_knowledgegraph。
-先读取 AGENTS.md 和 docs/graph_qa/HANDOFF.md，再检查 git status。
+先读取 AGENTS.md、docs/graph_qa/HANDOFF.md、local-demo.md 和
+product-quality-roadmap.md，再检查 git status。
 当前不实现内容生成，也不以多 worker 为运行目标。
-本地演示版已完成，先读取 docs/graph_qa/local-demo.md。
-本轮只开发新的用户可见功能；内部试用和公开上线工程化后续再做。
+当前主线是专业问答质量 v1：属性和关系事实进入回答上下文，
+同时完成多轮上下文、答案事实审核、来源披露和固定集评测。
+内部试用和公开上线工程化后续再做。
 开发前按 AGENTS.md 给出方案并等待确认。
 ```

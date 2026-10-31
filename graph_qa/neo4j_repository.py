@@ -9,7 +9,12 @@ from neo4j.graph import Node, Relationship
 
 from graph_qa.cypher_guard import CypherGuard, ValidatedCypher
 from graph_qa.entity_linker import EntityIndex, EntityRecord
-from graph_qa.models import CypherPlan, ErrorCode, QueryResult
+from graph_qa.models import (
+    AttributeQueryPlan,
+    CypherPlan,
+    ErrorCode,
+    QueryResult,
+)
 from graph_qa.schema import GraphSchema, SUPPORTED_ENTITY_LABELS
 
 ENTITY_INDEX_QUERY = """
@@ -19,6 +24,19 @@ WITH node, label
 WHERE label IN $labels AND node.name IS NOT NULL
 RETURN label, node.name AS name, node.alias AS alias
 ORDER BY label, name
+""".strip()
+ATTRIBUTE_QUERY_TEMPLATE = """
+MATCH (subject)
+WHERE any(label IN labels(subject) WHERE label IN $labels)
+  AND subject.name IN $entity_names
+OPTIONAL MATCH (subject)-[:FROM_SOURCE]->(source_node:Source)
+WITH subject, collect(DISTINCT source_node.name) AS source_names
+RETURN subject.name AS subject,
+       labels(subject)[0] AS subject_label,
+       properties(subject) AS properties,
+       [name IN source_names WHERE name IS NOT NULL] AS sources
+ORDER BY subject_label, subject
+LIMIT {limit}
 """.strip()
 
 
@@ -193,4 +211,94 @@ class Neo4jRepository:
             row_count=len(rows),
             elapsed_ms=int((time.perf_counter() - started_at) * 1000),
             limit_applied=validated.limit,
+        )
+
+    def execute_attributes(
+        self,
+        plan: AttributeQueryPlan,
+    ) -> QueryResult:
+        """执行受控节点属性查询，不接受任意 Cypher。"""
+        selected_attributes: Dict[str, set[str]] = {}
+        for selection in plan.selections:
+            allowed = set(self.schema.queryable_attributes(selection.label))
+            requested = set(selection.attributes)
+            invalid = requested - allowed
+            if invalid:
+                raise RepositoryError(
+                    ErrorCode.CYPHER_REJECTED,
+                    "属性查询包含未允许的字段",
+                )
+            selected_attributes.setdefault(selection.label, set()).update(
+                requested
+            )
+
+        used_keys = {(item.label, item.name) for item in plan.used_entities}
+        if not used_keys:
+            raise RepositoryError(
+                ErrorCode.CYPHER_REJECTED,
+                "属性查询缺少已链接实体",
+            )
+        labels = sorted({label for label, _name in used_keys})
+        if any(label not in selected_attributes for label in labels):
+            raise RepositoryError(
+                ErrorCode.CYPHER_REJECTED,
+                "属性查询缺少实体标签选择",
+            )
+
+        parameters = {
+            "labels": labels,
+            "entity_names": sorted({name for _label, name in used_keys}),
+        }
+        query = ATTRIBUTE_QUERY_TEMPLATE.format(limit=self.max_results)
+        started_at = time.perf_counter()
+        try:
+            raw_rows = self._run_transaction(
+                query,
+                parameters,
+                fetch_limit=self.max_results,
+            )
+        except Exception as exc:
+            text = str(exc).lower()
+            code = (
+                ErrorCode.QUERY_TIMEOUT
+                if "timeout" in text or "timed out" in text
+                else ErrorCode.QUERY_EXECUTION_FAILED
+            )
+            message = (
+                "图谱查询超时"
+                if code == ErrorCode.QUERY_TIMEOUT
+                else "图谱查询执行失败"
+            )
+            raise RepositoryError(code, message) from exc
+
+        rows: List[Dict[str, Any]] = []
+        for row in raw_rows:
+            label = row.get("subject_label")
+            name = row.get("subject")
+            if (label, name) not in used_keys or label not in selected_attributes:
+                continue
+            properties = row.get("properties")
+            if not isinstance(properties, Mapping):
+                continue
+            filtered = {
+                key: _json_safe(properties.get(key))
+                for key in sorted(selected_attributes[label])
+                if properties.get(key) not in (None, "", [], {})
+            }
+            rows.append(
+                {
+                    "subject": name,
+                    "subject_label": label,
+                    "properties": filtered,
+                    "sources": row.get("sources") or [],
+                }
+            )
+
+        return QueryResult(
+            cypher=query,
+            parameters=parameters,
+            rows=rows,
+            row_count=len(rows),
+            elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+            limit_applied=self.max_results,
         )

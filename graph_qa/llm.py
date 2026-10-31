@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from common.config import Config
 from graph_qa.models import (
+    AttributeFact,
     ConversationTurn,
     CypherPlan,
     EntityCandidate,
@@ -79,6 +80,7 @@ class QAReasoner(Protocol):
         linked_entities: Sequence[LinkedEntity],
         rows: Sequence[dict],
         evidence: Sequence[Evidence],
+        facts: Sequence[AttributeFact] = (),
     ) -> str:
         ...
 
@@ -88,6 +90,7 @@ class QAReasoner(Protocol):
         linked_entities: Sequence[LinkedEntity],
         rows: Sequence[dict],
         evidence: Sequence[Evidence],
+        facts: Sequence[AttributeFact],
         on_token: Callable[[str], None],
     ) -> str:
         ...
@@ -262,6 +265,7 @@ class LangChainQAReasoner:
         linked_entities: Sequence[LinkedEntity],
         rows: Sequence[dict],
         evidence: Sequence[Evidence],
+        facts: Sequence[AttributeFact] = (),
     ) -> str:
         evidence_rows: List[dict] = [
             item.model_dump(mode="json") for item in evidence
@@ -272,6 +276,7 @@ class LangChainQAReasoner:
                 linked_entities,
                 rows,
                 evidence_rows,
+                facts,
             )
         )
 
@@ -281,6 +286,7 @@ class LangChainQAReasoner:
         linked_entities: Sequence[LinkedEntity],
         rows: Sequence[dict],
         evidence: Sequence[Evidence],
+        facts: Sequence[AttributeFact],
         on_token: Callable[[str], None],
     ) -> str:
         evidence_rows: List[dict] = [
@@ -292,6 +298,7 @@ class LangChainQAReasoner:
                 linked_entities,
                 rows,
                 evidence_rows,
+                facts,
             ),
             on_token,
         )

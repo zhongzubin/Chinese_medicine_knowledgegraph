@@ -2,7 +2,7 @@
 """模型适配器的流式输出测试，不访问真实模型。"""
 
 from graph_qa.llm import LangChainQAReasoner
-from graph_qa.models import Evidence, LinkedEntity
+from graph_qa.models import AttributeFact, Evidence, LinkedEntity
 
 
 class FakeMessage:
@@ -69,6 +69,16 @@ def test_stream_graph_answer_emits_model_chunks():
                 relationship="HAS_EFFECT",
                 object="发汗",
                 object_label="Effect",
+            )
+        ],
+        [
+            AttributeFact(
+                subject="麻黄",
+                subject_label="Herb",
+                attribute="property_flavor",
+                attribute_label="性味",
+                value="辛、微苦，温",
+                source=None,
             )
         ],
         received.append,

@@ -5,6 +5,8 @@ import operator
 from typing import Annotated, List, Optional, TypedDict
 
 from graph_qa.models import (
+    AttributeFact,
+    AttributeQueryPlan,
     CypherPlan,
     ConversationTurn,
     EntityCandidate,
@@ -28,6 +30,9 @@ class AgentState(TypedDict, total=False):
     entity_candidates: List[EntityCandidate]
     linked_entities: List[LinkedEntity]
 
+    attribute_plan: Optional[AttributeQueryPlan]
+    attribute_query_attempted: bool
+    attribute_relation_fallback: bool
     cypher_plan: Optional[CypherPlan]
     query_attempts: int
     validation_errors: Annotated[List[str], operator.add]
@@ -39,6 +44,7 @@ class AgentState(TypedDict, total=False):
 
     query_result: Optional[QueryResult]
     evidence: List[Evidence]
+    facts: List[AttributeFact]
     answer: str
     grounded: bool
     warnings: Annotated[List[str], operator.add]

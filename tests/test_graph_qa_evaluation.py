@@ -2,6 +2,7 @@
 """黄金问题集加载和指标汇总测试。"""
 
 from collections import Counter
+from pathlib import Path
 
 from graph_qa.evaluate import (
     DEFAULT_CASES_PATH,
@@ -14,6 +15,7 @@ from graph_qa.evaluate import (
     summarize_retrieval,
 )
 from graph_qa.models import (
+    AttributeFact,
     EntityCandidate,
     Evidence,
     ErrorCode,
@@ -56,6 +58,19 @@ def test_default_qa_cases_are_valid_and_unique():
         case.category != "missing_entity" or case.retrieval_probe
         for case in cases
     )
+
+
+def test_product_quality_attribute_cases_are_valid():
+    cases = load_cases(
+        Path("evaluation/product_quality_cases.jsonl")
+    )
+
+    assert len(cases) == 10
+    assert {case.category for case in cases} == {
+        "herb_attribute",
+        "formula_attribute",
+    }
+    assert all(case.expected_facts for case in cases)
 
 
 def test_evaluate_cases_and_summary_metrics():
@@ -165,6 +180,121 @@ def test_evaluate_cases_and_summary_metrics():
     assert summary["failures"] == []
 
 
+def test_attribute_facts_count_as_grounded_context_and_match_expected_values():
+    case = EvaluationCase(
+        id="herb-attribute",
+        category="herb_attribute",
+        question="麻黄性味归经是什么？",
+        expected_intent=True,
+        expected_entities=[{"label": "Herb", "name": "麻黄"}],
+        expected_facts=[
+            {
+                "subject_label": "Herb",
+                "subject_name": "麻黄",
+                "attribute": "property_flavor",
+                "value_contains": "辛",
+            },
+            {
+                "subject_label": "Herb",
+                "subject_name": "麻黄",
+                "attribute": "meridian",
+                "value_contains": "肺经",
+            },
+        ],
+        expected_match_path="exact",
+        retrieval_probe="麻黄",
+        expected_outcome="grounded_answer",
+    )
+    response = GraphQAResponse(
+        question=case.question,
+        answer="麻黄性味为辛、微苦，温，归肺经、膀胱经。",
+        grounded=True,
+        linked_entities=[
+            LinkedEntity(
+                label="Herb",
+                name="麻黄",
+                matched_text="麻黄",
+                match_type="name",
+                score=1.0,
+            )
+        ],
+        facts=[
+            AttributeFact(
+                subject="麻黄",
+                subject_label="Herb",
+                attribute="property_flavor",
+                attribute_label="性味",
+                value="辛、微苦，温",
+                source="《中药大辞典》",
+            ),
+            AttributeFact(
+                subject="麻黄",
+                subject_label="Herb",
+                attribute="meridian",
+                attribute_label="归经",
+                value="归肺经、膀胱经",
+                source="《中药大辞典》",
+            ),
+        ],
+    )
+
+    summary = summarize(
+        evaluate_cases(FakeEvaluationEngine({case.question: response}), [case])
+    )
+
+    assert summary["outcome_accuracy"] == 1.0
+    assert summary["grounded_evidence_coverage"] == 1.0
+    assert summary["fact_cases_evaluated"] == 1
+    assert summary["fact_match_rate"] == 1.0
+
+
+def test_effect_attribute_fact_satisfies_relation_pattern_metric():
+    case = EvaluationCase(
+        id="effect-fact",
+        category="herb_effect",
+        question="麻黄有什么功效？",
+        expected_intent=True,
+        expected_entities=[{"label": "Herb", "name": "麻黄"}],
+        expected_patterns=[
+            {
+                "subject_label": "Herb",
+                "relationship": "HAS_EFFECT",
+                "object_label": "Effect",
+            }
+        ],
+        expected_outcome="grounded_answer",
+    )
+    response = GraphQAResponse(
+        question=case.question,
+        answer="麻黄功效为发汗、平喘、利水。",
+        grounded=True,
+        linked_entities=[
+            LinkedEntity(
+                label="Herb",
+                name="麻黄",
+                matched_text="麻黄",
+                match_type="name",
+                score=1.0,
+            )
+        ],
+        facts=[
+            AttributeFact(
+                subject="麻黄",
+                subject_label="Herb",
+                attribute="effect",
+                attribute_label="功效",
+                value="发汗，平喘，利水",
+            )
+        ],
+    )
+
+    summary = summarize(
+        evaluate_cases(FakeEvaluationEngine({case.question: response}), [case])
+    )
+
+    assert summary["pattern_match_rate"] == 1.0
+
+
 def test_query_metrics_keep_execution_failure_after_valid_cypher():
     cases = [
         EvaluationCase(
@@ -246,6 +376,7 @@ def test_acceptance_uses_documented_thresholds_not_outcome_100():
     assert acceptance["passed"] is True
     assert acceptance["failed_metrics"] == []
     assert acceptance["not_evaluated_metrics"] == [
+        "fact_match_rate",
         "empty_result_honesty_rate"
     ]
 

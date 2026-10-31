@@ -118,6 +118,7 @@ CLI 不读取交互式标准输入。Streamlit 通过 FastAPI 服务接口接入
       "source": null
     }
   ],
+  "facts": [],
   "warnings": [],
   "error": null
 }
@@ -136,6 +137,7 @@ CLI 不读取交互式标准输入。Streamlit 通过 FastAPI 服务接口接入
   "linked_entities": [],
   "query": null,
   "evidence": [],
+  "facts": [],
   "warnings": [],
   "error": {
     "code": "CYPHER_REJECTED",
@@ -245,6 +247,29 @@ Evidence
 `used_entities` 的 `(label, name)` 相同；与全部计划目标无关的证据必须丢弃。
 没有目标证据时返回 `NO_GRAPH_EVIDENCE`，不得标记为 `grounded=true`。
 
+### 4.7 属性事实
+
+节点属性使用独立事实结构，不伪装成关系证据：
+
+```text
+AttributeFact
+- subject: str
+- subject_label: str
+- attribute: str
+- attribute_label: str
+- value: str
+- source: str | null
+```
+
+属性查询只能使用白名单字段。当前支持：
+
+- `Herb`：别名、功效、主治、用量、归经、产地、炮制、性味、禁忌、性状、用法。
+- `Formula`：别名、功效、主治、组成字段、禁忌、用法。
+
+属性值、标签、实体名称和来源必须来自实际 Neo4j 查询结果。`source` 为空时，回答和前端必须明确显示“当前图谱未提供出处”，不能编造文献。
+
+`GraphQAResponse.facts` 为新增可选数组，默认空。该变化属于向后兼容的字段增加，当前 `schema_version` 仍为 `1.0`。
+
 ## 5. 大模型输出契约
 
 ### 5.1 意图分类
@@ -257,6 +282,15 @@ Evidence
 “药材、方剂、功效、治疗”等通用意图词不进入 exact、fuzzy 或 semantic 候选。
 
 ### 5.3 Cypher 生成
+
+查询规划优先级固定为：
+
+1. 属性问题优先使用白名单属性模板，不调用模型生成属性查询。
+2. 高频关系问题在 Schema 方向和问题指向唯一时使用固定关系模板，支持正向和反向查询。
+3. 模板无法唯一覆盖时，才调用模型生成受 Schema 约束的 Text2Cypher。
+4. 所有关系模板和 Text2Cypher 结果都必须经过同一个只读校验器。
+
+当属性字段为空且问题涉及“功效”或“主治”时，允许受控回退到对应关系查询；其他属性为空时直接返回无可验证依据。
 
 模型必须返回单个 JSON 对象：
 
@@ -289,7 +323,9 @@ Evidence
 
 ### 5.4 回答
 
-回答节点输出纯文本。引用内容由程序根据 `Evidence` 渲染，不由模型自行编造引用编号。涉及来源时使用图谱中的 `Source.name`。
+回答节点输出纯文本。输入可以同时包含关系 `Evidence` 和属性 `AttributeFact`。引用内容由程序根据两类证据渲染，不由模型自行编造引用编号。涉及来源时使用图谱中的 `Source.name`。
+
+回答生成后必须执行证据支持检查。若模型回答没有包含任何本轮对象事实或属性值，系统应替换为基于证据的简化回答并返回警告。
 
 ## 6. Neo4j 仓储接口
 
@@ -299,6 +335,7 @@ Evidence
 load_entity_index() -> EntityIndex
 explain(cypher, parameters) -> None | raises QueryValidationError
 execute_read(cypher, parameters, timeout, max_rows) -> QueryResult
+execute_attributes(attribute_plan) -> QueryResult
 ```
 
 仓储责任：
@@ -306,6 +343,7 @@ execute_read(cypher, parameters, timeout, max_rows) -> QueryResult
 - 读取并缓存名称和别名的只读快照。
 - 在只读事务中执行查询。
 - 应用超时和结果上限。
+- 属性查询使用固定 Cypher 模板，不接受模型生成的任意属性查询。
 - 将驱动返回对象转换为可序列化数据。
 - 不拼接用户输入，不生成 Cypher，不调用大模型。
 
@@ -360,6 +398,7 @@ HTTP 响应不得默认暴露原始提示词、模型隐藏推理和完整数据
 | --- | --- |
 | `stage` | `stage`、中文 `label` |
 | `evidence` | `items` 数组 |
+| `facts` | `items` 数组，属性事实 |
 | `answer_delta` | `delta` 文本 |
 | `warning` | `message` |
 | `error` | 稳定错误码与消息 |
@@ -380,6 +419,14 @@ HTTP 响应不得默认暴露原始提示词、模型隐藏推理和完整数据
 会话实际作用域为 `(client_id, session_id)`。不同 API Key 不能互相读取或删除会话。当前静态 API Key 不提供同一客户端内部的端用户隔离；需要该能力时应接入 JWT/OIDC 等用户身份。
 
 Redis 只保存最近 5 轮问题、回答、已链接实体、grounded 状态和时间戳。默认 TTL 为 86400 秒，不保存 Cypher、完整查询行、模型提示词或错误堆栈。单个会话使用 Redis 分布式锁，禁止并发覆盖历史。
+
+新会话在首次请求处理前创建空历史。若本轮失败、安全拒绝或未保存成功：
+
+- 失败回答不得加入历史。
+- 空会话仍然有效，调用方可以继续使用返回的 `session_id`。
+- 调用方不得保留服务端未创建成功的会话 ID。
+
+显式出现新的已知实体时，该实体切换为当前主题；只有在指代、省略主语或明确追问上文的场景下才调用上下文改写。多轮改写不得添加历史中不存在的事实。
 
 M1 CLI 和评测继续使用无会话调用，不依赖 Redis 会话状态。
 

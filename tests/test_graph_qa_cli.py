@@ -7,6 +7,7 @@ from argparse import Namespace
 from graph_qa import cli
 from graph_qa.cli import CLIConfigError, parse_args, render_text, run
 from graph_qa.models import (
+    AttributeFact,
     ErrorCode,
     Evidence,
     GraphQAResponse,
@@ -69,6 +70,30 @@ def test_render_text_includes_evidence_and_optional_query():
     assert "HAS_EFFECT" in output
     assert "Cypher" in output
     assert "entity_names" in output
+
+
+def test_render_text_includes_attribute_fact_and_source():
+    response = GraphQAResponse(
+        question="麻黄性味是什么？",
+        answer="麻黄性味为辛、微苦，温。",
+        grounded=True,
+        facts=[
+            AttributeFact(
+                subject="麻黄",
+                subject_label="Herb",
+                attribute="property_flavor",
+                attribute_label="性味",
+                value="辛、微苦，温",
+                source="《中药大辞典》",
+            )
+        ],
+    )
+
+    output = render_text(response)
+
+    assert "图谱属性" in output
+    assert "性味：辛、微苦，温" in output
+    assert "《中药大辞典》" in output
 
 
 def test_run_json_output_and_closes_repository():
