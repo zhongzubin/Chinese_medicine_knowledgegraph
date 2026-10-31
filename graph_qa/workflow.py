@@ -300,6 +300,13 @@ def _is_count_question(question: str) -> bool:
     return any(term in question for term in COUNT_TERMS)
 
 
+def _has_explicit_conjunction(question: str) -> bool:
+    return any(
+        marker in question
+        for marker in ("同时", "既", "都", "并且", "和", "与", "、")
+    )
+
+
 def _aggregate_description(
     anchor_names: Sequence[str],
     result_label: str,
@@ -307,6 +314,8 @@ def _aggregate_description(
 ) -> str:
     anchor_text = "、".join(anchor_names)
     result_text = ENTITY_LABEL_DISPLAY_NAMES.get(result_label, result_label)
+    if direction == "incoming" and len(anchor_names) > 1:
+        return f"同时关联到{anchor_text}的{result_text}"
     if direction == "incoming":
         return f"关联到{anchor_text}的{result_text}"
     return f"{anchor_text}关联的{result_text}"
@@ -760,6 +769,19 @@ class GraphQAEngine:
                 "rewritten_question": question,
                 "stage_events": ["rewrite_question"],
             }
+        previous_turn = history[-1]
+        if (
+            not previous_turn.linked_entities
+            and "请补充" in previous_turn.answer
+            and any(pronoun in question for pronoun in CONTEXT_PRONOUNS)
+        ):
+            return {
+                "rewritten_question": question,
+                "warnings": [
+                    "上一轮未确认具体实体，本轮需要继续澄清指代。"
+                ],
+                "stage_events": ["rewrite_question"],
+            }
 
         rewrite = getattr(self.reasoner, "rewrite_question", None)
         if not callable(rewrite):
@@ -1040,6 +1062,17 @@ class GraphQAEngine:
         anchor_names = sorted(
             {item.name for item in selection.entities}
         )
+        require_all_entities = (
+            len(anchor_names) > 1
+            and selection.direction == "incoming"
+            and _has_explicit_conjunction(_active_question(state))
+        )
+        if (
+            len(anchor_names) > 1
+            and selection.direction == "outgoing"
+            and _has_explicit_conjunction(_active_question(state))
+        ):
+            return None
         return AggregateQueryPlan(
             subject_label=selection.subject_label,
             relationship=selection.relationship,
@@ -1055,6 +1088,7 @@ class GraphQAEngine:
                 )
             ],
             direction=selection.direction,
+            require_all_entities=require_all_entities,
             description=_aggregate_description(
                 anchor_names,
                 result_label,

@@ -336,3 +336,30 @@ def test_execute_aggregate_rejects_wrong_anchor_direction():
         repository.execute_aggregate(plan)
 
     assert session.begin_calls == []
+
+
+def test_execute_aggregate_requires_all_entities_for_intersection():
+    session = FakeSession(query_rows=[{"count": 7}])
+    repository, _driver = make_repository(session)
+    plan = AggregateQueryPlan(
+        subject_label="Formula",
+        relationship="HAS_INGREDIENT",
+        object_label="Herb",
+        used_entities=[
+            UsedEntityRef(label="Herb", name="人参"),
+            UsedEntityRef(label="Herb", name="白术"),
+        ],
+        direction="incoming",
+        require_all_entities=True,
+        description="同时关联到人参、白术的方剂",
+    )
+
+    result = repository.execute_aggregate(plan)
+
+    assert result.rows == [{"count": 7}]
+    query, parameters = session.transaction.queries[0]
+    assert query.count("EXISTS") == 2
+    assert parameters == {
+        "entity_0": "人参",
+        "entity_1": "白术",
+    }

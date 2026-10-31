@@ -65,7 +65,7 @@ def test_product_quality_cases_are_valid():
         Path("evaluation/product_quality_cases.jsonl")
     )
 
-    assert len(cases) == 14
+    assert len(cases) == 16
     assert {case.category for case in cases} == {
         "herb_attribute",
         "formula_attribute",

@@ -346,19 +346,49 @@ class Neo4jRepository:
                 "聚合查询包含未使用的实体标签",
             )
 
-        anchor = "subject" if plan.direction == "outgoing" else "object"
-        result = "object" if plan.direction == "outgoing" else "subject"
-        query = AGGREGATE_QUERY_TEMPLATE.format(
-            subject_label=plan.subject_label,
-            relationship=plan.relationship,
-            object_label=plan.object_label,
-            anchor=anchor,
-            result=result,
-        )
         entity_names = sorted(
             {item.name for item in plan.used_entities}
         )
-        parameters = {"entity_names": entity_names}
+        if plan.require_all_entities:
+            if plan.direction != "incoming":
+                raise RepositoryError(
+                    ErrorCode.CYPHER_REJECTED,
+                    "多条件聚合只支持反向实体交集",
+                )
+            if len(entity_names) < 2:
+                raise RepositoryError(
+                    ErrorCode.CYPHER_REJECTED,
+                    "多条件聚合至少需要两个实体",
+                )
+            exists_clauses = []
+            parameters = {}
+            for index, entity_name in enumerate(entity_names):
+                parameter_name = f"entity_{index}"
+                parameters[parameter_name] = entity_name
+                exists_clauses.append(
+                    "EXISTS { "
+                    f"MATCH (subject)-[:{plan.relationship}]->"
+                    f"(required:{plan.object_label}) "
+                    f"WHERE required.name = ${parameter_name} "
+                    "}"
+                )
+            query = (
+                f"MATCH (subject:{plan.subject_label})\n"
+                f"WHERE {' AND '.join(exists_clauses)}\n"
+                "RETURN count(DISTINCT subject) AS count\n"
+                "LIMIT 1"
+            )
+        else:
+            anchor = "subject" if plan.direction == "outgoing" else "object"
+            result = "object" if plan.direction == "outgoing" else "subject"
+            query = AGGREGATE_QUERY_TEMPLATE.format(
+                subject_label=plan.subject_label,
+                relationship=plan.relationship,
+                object_label=plan.object_label,
+                anchor=anchor,
+                result=result,
+            )
+            parameters = {"entity_names": entity_names}
         started_at = time.perf_counter()
         try:
             rows = self._run_transaction(

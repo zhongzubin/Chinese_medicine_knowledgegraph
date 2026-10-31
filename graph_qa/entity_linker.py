@@ -19,6 +19,8 @@ from typing import (
 from graph_qa.models import EntityCandidate, LinkedEntity
 
 NORMALIZE_RE = re.compile(r"[\W_]+", re.UNICODE)
+QUESTION_SEPARATOR_RE = re.compile(r"[\s,，、;；/]+", re.UNICODE)
+NON_WORD_KEEP_SEPARATOR_RE = re.compile(r"[^\w|]+", re.UNICODE)
 ALIAS_SPLIT_RE = re.compile(r"[，,、；;/\n]+")
 GENERIC_ENTITY_TERMS = frozenset(
     {
@@ -186,6 +188,13 @@ def normalize_entity_text(value: str) -> str:
     return NORMALIZE_RE.sub("", normalized)
 
 
+def normalize_question_boundaries(value: str) -> str:
+    """保留列表分隔符，供同一问题中的多实体匹配使用。"""
+    normalized = unicodedata.normalize("NFKC", value).casefold()
+    normalized = QUESTION_SEPARATOR_RE.sub("|", normalized)
+    return NON_WORD_KEEP_SEPARATOR_RE.sub("", normalized)
+
+
 def split_aliases(value: Optional[str]) -> List[str]:
     if not value:
         return []
@@ -194,13 +203,21 @@ def split_aliases(value: Optional[str]) -> List[str]:
 
 def _has_direct_question_boundary(text: str, start: int, end: int) -> bool:
     """要求实体词位于问题边界，避免长未知词中的短实体被直接命中。"""
-    left_ok = start == 0 or any(
-        text[:start].endswith(marker)
-        for marker in DIRECT_LEFT_BOUNDARY_MARKERS
+    left_ok = (
+        start == 0
+        or text[start - 1] == "|"
+        or any(
+            text[:start].endswith(marker)
+            for marker in DIRECT_LEFT_BOUNDARY_MARKERS
+        )
     )
-    right_ok = end == len(text) or any(
-        text[end:].startswith(marker)
-        for marker in DIRECT_RIGHT_BOUNDARY_MARKERS
+    right_ok = (
+        end == len(text)
+        or text[end] == "|"
+        or any(
+            text[end:].startswith(marker)
+            for marker in DIRECT_RIGHT_BOUNDARY_MARKERS
+        )
     )
     return left_ok and right_ok
 
@@ -416,7 +433,7 @@ class EntityIndex:
         if limit_per_label < 1:
             raise ValueError("limit_per_label 必须大于等于 1")
 
-        normalized_question = normalize_entity_text(question)
+        normalized_question = normalize_question_boundaries(question)
         results: List[LinkedEntity] = []
         linkable_candidates = [
             candidate
@@ -462,7 +479,7 @@ class EntityIndex:
         if limit_per_label < 1:
             raise ValueError("limit_per_label 必须大于等于 1")
         results = self._direct_question_matches(
-            normalize_entity_text(question),
+            normalize_question_boundaries(question),
             None,
         )
         return self._finalize(results, limit_per_label)

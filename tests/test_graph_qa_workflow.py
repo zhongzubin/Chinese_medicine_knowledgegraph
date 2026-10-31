@@ -158,6 +158,7 @@ def make_formula_index() -> EntityIndex:
         [
             EntityRecord("Formula", "四君子汤"),
             EntityRecord("Herb", "人参"),
+            EntityRecord("Herb", "白术"),
         ]
     )
 
@@ -269,6 +270,7 @@ class FakeRepository:
         self.execute_calls = 0
         self.attribute_calls = 0
         self.aggregate_calls = 0
+        self.aggregate_plans = []
         self.closed = False
 
     def load_entity_index(self):
@@ -301,13 +303,28 @@ class FakeRepository:
 
     def execute_aggregate(self, plan) -> QueryResult:
         self.aggregate_calls += 1
-        result = "object" if plan.direction == "outgoing" else "subject"
-        return QueryResult(
-            cypher=(
+        self.aggregate_plans.append(plan)
+        names = [item.name for item in plan.used_entities]
+        if plan.require_all_entities:
+            parameters = {
+                f"entity_{index}": name
+                for index, name in enumerate(names)
+            }
+            cypher = (
+                "MATCH (subject) WHERE EXISTS { MATCH (subject) } "
+                "AND EXISTS { MATCH (subject) } "
+                "RETURN count(DISTINCT subject) AS count"
+            )
+        else:
+            result = "object" if plan.direction == "outgoing" else "subject"
+            parameters = {"entity_names": names}
+            cypher = (
                 "MATCH (subject)-[relationship]->(object) "
                 f"RETURN count(DISTINCT {result}) AS count"
-            ),
-            parameters={"entity_names": [item.name for item in plan.used_entities]},
+            )
+        return QueryResult(
+            cypher=cypher,
+            parameters=parameters,
             rows=[{"count": self.aggregate_count}],
             row_count=1,
             elapsed_ms=1,
@@ -565,6 +582,25 @@ def test_reverse_aggregate_counts_formulas_containing_herb():
     assert reasoner.plan_calls == 0
 
 
+def test_multi_condition_aggregate_requires_both_herbs():
+    reasoner = FakeReasoner(intent=tcm_intent())
+    repository = FakeRepository(aggregate_count=7)
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_formula_index(),
+    )
+
+    response = engine.answer("同时含有人参和白术的方剂有多少种？")
+
+    assert response.grounded is True
+    assert response.aggregates[0].count == 7
+    assert response.aggregates[0].description == "同时关联到人参、白术的方剂"
+    assert repository.aggregate_plans[0].require_all_entities is True
+    assert reasoner.plan_calls == 0
+
+
 def test_stream_answer_emits_aggregate_event_and_count():
     engine = GraphQAEngine(
         reasoner=FakeReasoner(intent=tcm_intent()),
@@ -742,6 +778,35 @@ def test_rewrite_failure_uses_recent_entity_and_pronoun():
 
     assert update["rewritten_question"] == "麻黄有什么禁忌?"
     assert update["warnings"]
+
+
+def test_pronoun_after_entity_clarification_requires_new_context():
+    reasoner = FakeReasoner(intent=tcm_intent(), rewritten_question="麻黄归经是什么？")
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=FakeRepository(),
+        schema=make_schema(),
+        entity_index=make_index(),
+    )
+    history = [
+        ConversationTurn(
+            question="星辰草有什么功效？",
+            answer="请补充具体实体。",
+            linked_entities=[],
+            grounded=False,
+        )
+    ]
+
+    update = engine._rewrite_question(
+        {
+            "normalized_question": "它归经是什么？",
+            "conversation_history": history,
+        }
+    )
+
+    assert update["rewritten_question"] == "它归经是什么？"
+    assert update["warnings"]
+    assert reasoner.rewrite_calls == []
 
 
 def test_stream_answer_emits_public_stages_progress_and_answer_deltas():

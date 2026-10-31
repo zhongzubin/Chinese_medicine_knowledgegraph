@@ -287,7 +287,7 @@ AggregateFact
 - description: str
 ```
 
-聚合查询只允许已存在的 Schema 三元组模式和单跳 `count(DISTINCT ...)`。`GraphQAResponse.aggregates` 默认空数组，不把计数伪装成节点属性或关系证据。
+聚合查询只允许已存在的 Schema 三元组模式和单跳 `count(DISTINCT ...)`。`require_all_entities=true` 时，每个已链接实体都必须满足同一条 Schema 关系，用于交集计数。`GraphQAResponse.aggregates` 默认空数组，不把计数伪装成节点属性或关系证据。
 
 ## 5. 大模型输出契约
 
@@ -365,7 +365,7 @@ execute_aggregate(aggregate_plan) -> QueryResult
 - 在只读事务中执行查询。
 - 应用超时和结果上限。
 - 属性查询使用固定 Cypher 模板，不接受模型生成的任意属性查询。
-- 聚合查询使用固定单跳计数模板，不允许聚合表达式或标签由模型任意生成。
+- 聚合查询使用固定单跳/交集计数模板，不允许聚合表达式或标签由模型任意生成。
 - 将驱动返回对象转换为可序列化数据。
 - 不拼接用户输入，不生成 Cypher，不调用大模型。
 

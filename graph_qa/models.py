@@ -127,6 +127,7 @@ class AggregateQueryPlan(StrictModel):
     object_label: EntityLabel
     used_entities: List[UsedEntityRef] = Field(min_length=1)
     direction: AggregateDirection
+    require_all_entities: bool = False
     description: str = Field(min_length=1, max_length=160)
 
 
