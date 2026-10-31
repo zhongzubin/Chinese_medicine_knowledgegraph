@@ -6,6 +6,7 @@ import pytest
 
 from graph_qa.cypher_guard import CypherGuard, CypherGuardError
 from graph_qa.models import (
+    AggregateQueryPlan,
     AttributeQueryPlan,
     AttributeSelection,
     CypherPlan,
@@ -55,13 +56,21 @@ def make_schema() -> GraphSchema:
                 }
                 for label in ("Herb", "Formula", "Disease", "Symptom", "Effect", "Source")
             ],
-            "relationship_types": [{"type": "HAS_EFFECT"}],
+            "relationship_types": [
+                {"type": "HAS_EFFECT"},
+                {"type": "HAS_INGREDIENT"},
+            ],
             "triple_patterns": [
                 {
                     "subject_label": "Herb",
                     "relationship_type": "HAS_EFFECT",
                     "object_label": "Effect",
-                }
+                },
+                {
+                    "subject_label": "Formula",
+                    "relationship_type": "HAS_INGREDIENT",
+                    "object_label": "Herb",
+                },
             ],
         }
     )
@@ -287,5 +296,43 @@ def test_execute_attributes_rejects_non_whitelisted_field():
 
     with pytest.raises(RepositoryError, match="属性查询包含未允许的字段"):
         repository.execute_attributes(plan)
+
+    assert session.begin_calls == []
+
+
+def test_execute_aggregate_counts_distinct_related_entities():
+    session = FakeSession(query_rows=[{"count": 4}])
+    repository, _driver = make_repository(session)
+    plan = AggregateQueryPlan(
+        subject_label="Formula",
+        relationship="HAS_INGREDIENT",
+        object_label="Herb",
+        used_entities=[UsedEntityRef(label="Formula", name="四君子汤")],
+        direction="outgoing",
+        description="四君子汤关联的药材",
+    )
+
+    result = repository.execute_aggregate(plan)
+
+    assert result.rows == [{"count": 4}]
+    query, parameters = session.transaction.queries[0]
+    assert "count(DISTINCT object)" in query
+    assert parameters == {"entity_names": ["四君子汤"]}
+
+
+def test_execute_aggregate_rejects_wrong_anchor_direction():
+    session = FakeSession(query_rows=[])
+    repository, _driver = make_repository(session)
+    plan = AggregateQueryPlan(
+        subject_label="Formula",
+        relationship="HAS_INGREDIENT",
+        object_label="Herb",
+        used_entities=[UsedEntityRef(label="Herb", name="人参")],
+        direction="outgoing",
+        description="人参关联的方剂",
+    )
+
+    with pytest.raises(RepositoryError, match="关系方向不匹配"):
+        repository.execute_aggregate(plan)
 
     assert session.begin_calls == []

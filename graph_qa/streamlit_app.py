@@ -92,6 +92,7 @@ def main() -> None:
     answer = ""
     evidence = []
     facts = []
+    aggregates = []
     warnings = []
     progress_labels = []
     answer_placeholder.markdown(_answer_markdown(answer))
@@ -140,6 +141,8 @@ def main() -> None:
                     evidence = event_data.get("items", [])
                 elif event_name == "facts":
                     facts = event_data.get("items", [])
+                elif event_name == "aggregates":
+                    aggregates = event_data.get("items", [])
                 elif event_name == "warning":
                     message = event_data.get("message")
                     if message:
@@ -185,6 +188,12 @@ def main() -> None:
                 st.markdown(
                     f"- `{item['subject']}:{item['subject_label']}` "
                     f"{item['attribute_label']}：{item['value']}{source}"
+                )
+    if aggregates:
+        with st.expander("图谱统计"):
+            for item in aggregates:
+                st.markdown(
+                    f"- {item['description']}共有 {item['count']} 个"
                 )
     if st.session_state.session_id:
         st.caption(f"会话：{st.session_state.session_id}")

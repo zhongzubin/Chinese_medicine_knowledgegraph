@@ -224,6 +224,10 @@ def render_text(response: GraphQAResponse, show_query: bool = False) -> str:
                 f"- ({item.subject}:{item.subject_label}) "
                 f"{item.attribute_label}：{item.value}{source}"
             )
+    if response.aggregates:
+        lines.extend(["", "图谱统计："])
+        for item in response.aggregates:
+            lines.append(f"- {item.description}：{item.count}")
     if response.evidence:
         lines.extend(["", "图谱证据："])
         for item in response.evidence:

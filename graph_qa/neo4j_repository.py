@@ -10,6 +10,7 @@ from neo4j.graph import Node, Relationship
 from graph_qa.cypher_guard import CypherGuard, ValidatedCypher
 from graph_qa.entity_linker import EntityIndex, EntityRecord
 from graph_qa.models import (
+    AggregateQueryPlan,
     AttributeQueryPlan,
     CypherPlan,
     ErrorCode,
@@ -37,6 +38,12 @@ RETURN subject.name AS subject,
        [name IN source_names WHERE name IS NOT NULL] AS sources
 ORDER BY subject_label, subject
 LIMIT {limit}
+""".strip()
+AGGREGATE_QUERY_TEMPLATE = """
+MATCH (subject:{subject_label})-[relationship:{relationship}]->(object:{object_label})
+WHERE {anchor}.name IN $entity_names
+RETURN count(DISTINCT {result}) AS count
+LIMIT 1
 """.strip()
 
 
@@ -301,4 +308,83 @@ class Neo4jRepository:
             row_count=len(rows),
             elapsed_ms=int((time.perf_counter() - started_at) * 1000),
             limit_applied=self.max_results,
+        )
+
+    def execute_aggregate(
+        self,
+        plan: AggregateQueryPlan,
+    ) -> QueryResult:
+        """执行受控的一跳关系计数。"""
+        try:
+            self.schema.assert_pattern(
+                plan.subject_label,
+                plan.relationship,
+                plan.object_label,
+            )
+        except Exception as exc:
+            raise RepositoryError(
+                ErrorCode.CYPHER_REJECTED,
+                "聚合查询不符合图谱 Schema",
+            ) from exc
+
+        anchor_label = (
+            plan.subject_label
+            if plan.direction == "outgoing"
+            else plan.object_label
+        )
+        if any(item.label != anchor_label for item in plan.used_entities):
+            raise RepositoryError(
+                ErrorCode.CYPHER_REJECTED,
+                "聚合查询实体与关系方向不匹配",
+            )
+        if any(
+            item.label not in {plan.subject_label, plan.object_label}
+            for item in plan.used_entities
+        ):
+            raise RepositoryError(
+                ErrorCode.CYPHER_REJECTED,
+                "聚合查询包含未使用的实体标签",
+            )
+
+        anchor = "subject" if plan.direction == "outgoing" else "object"
+        result = "object" if plan.direction == "outgoing" else "subject"
+        query = AGGREGATE_QUERY_TEMPLATE.format(
+            subject_label=plan.subject_label,
+            relationship=plan.relationship,
+            object_label=plan.object_label,
+            anchor=anchor,
+            result=result,
+        )
+        entity_names = sorted(
+            {item.name for item in plan.used_entities}
+        )
+        parameters = {"entity_names": entity_names}
+        started_at = time.perf_counter()
+        try:
+            rows = self._run_transaction(
+                query,
+                parameters,
+                fetch_limit=1,
+            )
+        except Exception as exc:
+            text = str(exc).lower()
+            code = (
+                ErrorCode.QUERY_TIMEOUT
+                if "timeout" in text or "timed out" in text
+                else ErrorCode.QUERY_EXECUTION_FAILED
+            )
+            message = (
+                "图谱查询超时"
+                if code == ErrorCode.QUERY_TIMEOUT
+                else "图谱查询执行失败"
+            )
+            raise RepositoryError(code, message) from exc
+
+        return QueryResult(
+            cypher=query,
+            parameters=parameters,
+            rows=rows,
+            row_count=len(rows),
+            elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+            limit_applied=1,
         )

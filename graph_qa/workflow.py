@@ -4,6 +4,7 @@
 import re
 import unicodedata
 import uuid
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 from langgraph.config import get_stream_writer
@@ -14,6 +15,8 @@ from graph_qa.cypher_guard import CypherGuard, CypherGuardError, detect_unsafe_q
 from graph_qa.entity_linker import EntityIndex
 from graph_qa.llm import QAReasoner, ReasonerError
 from graph_qa.models import (
+    AggregateFact,
+    AggregateQueryPlan,
     AttributeFact,
     AttributeQueryPlan,
     AttributeSelection,
@@ -99,6 +102,24 @@ CONTEXT_PRONOUNS = (
     "该症状",
     "它",
 )
+COUNT_TERMS = ("多少", "几个", "几种", "数量", "多少个", "多少种")
+ENTITY_LABEL_DISPLAY_NAMES = {
+    "Herb": "药材",
+    "Formula": "方剂",
+    "Disease": "疾病",
+    "Symptom": "症状",
+    "Effect": "功效",
+    "Source": "文献",
+}
+
+
+@dataclass(frozen=True)
+class RelationshipSelection:
+    subject_label: str
+    relationship: str
+    object_label: str
+    direction: str
+    entities: Tuple[Any, ...]
 
 STAGE_LABELS = {
     "normalize": "规范化问题",
@@ -275,6 +296,22 @@ def _entity_hints(question: str) -> Set[str]:
     }
 
 
+def _is_count_question(question: str) -> bool:
+    return any(term in question for term in COUNT_TERMS)
+
+
+def _aggregate_description(
+    anchor_names: Sequence[str],
+    result_label: str,
+    direction: str,
+) -> str:
+    anchor_text = "、".join(anchor_names)
+    result_text = ENTITY_LABEL_DISPLAY_NAMES.get(result_label, result_label)
+    if direction == "incoming":
+        return f"关联到{anchor_text}的{result_text}"
+    return f"{anchor_text}关联的{result_text}"
+
+
 def _relationship_direction_hint(
     question: str,
     linked_entities: Sequence[Any],
@@ -382,6 +419,7 @@ def _answer_supported_by_context(
     answer: str,
     evidence: Sequence[Evidence],
     facts: Sequence[AttributeFact],
+    aggregates: Sequence[AggregateFact] = (),
 ) -> bool:
     normalized_answer = normalize_question(answer)
     candidates: Set[str] = set()
@@ -394,10 +432,20 @@ def _answer_supported_by_context(
             for part in re.split(r"[\s，,、；;。]+", item.value)
             if part.strip()
         )
+    for item in aggregates:
+        candidates.add(str(item.count))
+        candidates.add(item.description)
     return any(
         len(candidate) >= 2 and candidate in normalized_answer
         for candidate in candidates
     )
+
+
+def _aggregate_answer(aggregates: Sequence[AggregateFact]) -> str:
+    lines = ["根据当前图谱统计："]
+    for item in aggregates:
+        lines.append(f"- {item.description}共有 {item.count} 个")
+    return "\n".join(lines)
 
 
 def facts_match_used_entities(
@@ -865,10 +913,10 @@ class GraphQAEngine:
             ],
         )
 
-    def _build_relationship_template_plan(
+    def _select_relationship_pattern(
         self,
         state: AgentState,
-    ) -> Optional[CypherPlan]:
+    ) -> Optional[RelationshipSelection]:
         question = _active_question(state)
         requested_relations = _requested_relations(question)
         if not requested_relations:
@@ -879,7 +927,7 @@ class GraphQAEngine:
         for entity in all_linked_entities:
             linked_by_label.setdefault(entity.label, []).append(entity)
 
-        candidates: List[Tuple[int, CypherPlan]] = []
+        candidates: List[Tuple[int, RelationshipSelection]] = []
         for subject_label, relation, object_label in self.schema.triple_patterns:
             if relation not in requested_relations:
                 continue
@@ -904,12 +952,12 @@ class GraphQAEngine:
                 candidates.append(
                     (
                         score,
-                        self._relationship_template(
+                        RelationshipSelection(
                             subject_label,
                             relation,
                             object_label,
-                            subject_entities,
-                            reverse=False,
+                            "outgoing",
+                            tuple(subject_entities),
                         ),
                     )
                 )
@@ -928,36 +976,91 @@ class GraphQAEngine:
                 candidates.append(
                     (
                         score,
-                        self._relationship_template(
+                        RelationshipSelection(
                             subject_label,
                             relation,
                             object_label,
-                            object_entities,
-                            reverse=True,
+                            "incoming",
+                            tuple(object_entities),
                         ),
                     )
                 )
 
         if not candidates:
             return None
-        best_score = max(score for score, _plan in candidates)
+        best_score = max(score for score, _selection in candidates)
         best = [
-            plan
-            for score, plan in candidates
+            selection
+            for score, selection in candidates
             if score == best_score
         ]
         unique = {
             (
-                plan.expected_result_shape,
-                plan.cypher,
-                tuple(item.label for item in plan.used_entities),
-                tuple(item.name for item in plan.used_entities),
-            ): plan
-            for plan in best
+                selection.subject_label,
+                selection.relationship,
+                selection.object_label,
+                selection.direction,
+                tuple(item.name for item in selection.entities),
+            ): selection
+            for selection in best
         }
         if len(unique) != 1:
             return None
         return next(iter(unique.values()))
+
+    def _build_relationship_template_plan(
+        self,
+        state: AgentState,
+    ) -> Optional[CypherPlan]:
+        selection = self._select_relationship_pattern(state)
+        if selection is None:
+            return None
+        return self._relationship_template(
+            selection.subject_label,
+            selection.relationship,
+            selection.object_label,
+            selection.entities,
+            reverse=selection.direction == "incoming",
+        )
+
+    def _build_aggregate_plan(
+        self,
+        state: AgentState,
+    ) -> Optional[AggregateQueryPlan]:
+        if not _is_count_question(_active_question(state)):
+            return None
+        selection = self._select_relationship_pattern(state)
+        if selection is None:
+            return None
+        result_label = (
+            selection.object_label
+            if selection.direction == "outgoing"
+            else selection.subject_label
+        )
+        anchor_names = sorted(
+            {item.name for item in selection.entities}
+        )
+        return AggregateQueryPlan(
+            subject_label=selection.subject_label,
+            relationship=selection.relationship,
+            object_label=selection.object_label,
+            used_entities=[
+                {
+                    "label": item.label,
+                    "name": item.name,
+                }
+                for item in sorted(
+                    selection.entities,
+                    key=lambda entity: (entity.label, entity.name),
+                )
+            ],
+            direction=selection.direction,
+            description=_aggregate_description(
+                anchor_names,
+                result_label,
+                selection.direction,
+            ),
+        )
 
     def _relationship_template(
         self,
@@ -1029,6 +1132,16 @@ LIMIT {limit}
                 "query_attempts": state.get("query_attempts", 0),
                 "stage_events": ["plan_cypher"],
             }
+        aggregate_plan = self._build_aggregate_plan(state)
+        if aggregate_plan is not None:
+            return {
+                "aggregate_plan": aggregate_plan,
+                "attribute_plan": None,
+                "attribute_relation_fallback": False,
+                "cypher_plan": None,
+                "query_attempts": state.get("query_attempts", 0),
+                "stage_events": ["plan_cypher"],
+            }
         template_plan = self._build_relationship_template_plan(state)
         if template_plan is not None:
             return {
@@ -1094,6 +1207,41 @@ LIMIT {limit}
             }
 
     def _validate_cypher(self, state: AgentState) -> Dict[str, Any]:
+        aggregate_plan = state.get("aggregate_plan")
+        if aggregate_plan is not None:
+            try:
+                self.schema.assert_pattern(
+                    aggregate_plan.subject_label,
+                    aggregate_plan.relationship,
+                    aggregate_plan.object_label,
+                )
+                anchor_label = (
+                    aggregate_plan.subject_label
+                    if aggregate_plan.direction == "outgoing"
+                    else aggregate_plan.object_label
+                )
+                if any(
+                    entity.label != anchor_label
+                    for entity in aggregate_plan.used_entities
+                ):
+                    raise ValueError("聚合方向与实体不匹配")
+            except Exception:
+                return {
+                    "aggregate_plan": None,
+                    "is_cypher_valid": False,
+                    "validation_errors": [
+                        f"{ErrorCode.CYPHER_REJECTED.value}: "
+                        "聚合查询包含未允许的模式"
+                    ],
+                    "last_error_code": ErrorCode.CYPHER_REJECTED.value,
+                    "query_attempts": self.max_attempts,
+                    "stage_events": ["validate_cypher"],
+                }
+            return {
+                "is_cypher_valid": True,
+                "stage_events": ["validate_cypher"],
+            }
+
         attribute_plan = state.get("attribute_plan")
         if attribute_plan is not None:
             try:
@@ -1117,6 +1265,7 @@ LIMIT {limit}
                         "属性查询包含未允许的字段"
                     ],
                     "last_error_code": ErrorCode.CYPHER_REJECTED.value,
+                    "query_attempts": self.max_attempts,
                     "stage_events": ["validate_cypher"],
                 }
             return {
@@ -1163,6 +1312,68 @@ LIMIT {limit}
         }
 
     def _execute_cypher(self, state: AgentState) -> Dict[str, Any]:
+        aggregate_plan = state.get("aggregate_plan")
+        if aggregate_plan is not None:
+            try:
+                result = self.repository.execute_aggregate(aggregate_plan)
+            except RepositoryError as exc:
+                return self._terminal_error(
+                    state,
+                    exc.code,
+                    exc.message,
+                    "图谱查询失败，请稍后重试。",
+                    "execute_cypher",
+                )
+            except Exception:
+                return self._terminal_error(
+                    state,
+                    ErrorCode.QUERY_EXECUTION_FAILED,
+                    "聚合查询发生内部错误",
+                    "图谱查询失败，请稍后重试。",
+                    "execute_cypher",
+                )
+            count = (
+                result.rows[0].get("count")
+                if result.rows
+                else None
+            )
+            if not isinstance(count, int) or isinstance(count, bool):
+                return self._terminal_error(
+                    state,
+                    ErrorCode.QUERY_EXECUTION_FAILED,
+                    "聚合查询没有返回有效计数",
+                    "图谱查询失败，请稍后重试。",
+                    "execute_cypher",
+                )
+            result_label = (
+                aggregate_plan.object_label
+                if aggregate_plan.direction == "outgoing"
+                else aggregate_plan.subject_label
+            )
+            aggregate = AggregateFact(
+                anchor="、".join(
+                    sorted(
+                        {
+                            item.name
+                            for item in aggregate_plan.used_entities
+                        }
+                    )
+                ),
+                anchor_label=aggregate_plan.used_entities[0].label,
+                relationship=aggregate_plan.relationship,
+                result_label=result_label,
+                direction=aggregate_plan.direction,
+                count=count,
+                description=aggregate_plan.description,
+            )
+            return {
+                "query_result": result,
+                "evidence": [],
+                "facts": [],
+                "aggregates": [aggregate],
+                "stage_events": ["execute_cypher"],
+            }
+
         attribute_plan = state.get("attribute_plan")
         if attribute_plan is not None:
             try:
@@ -1266,9 +1477,11 @@ LIMIT {limit}
     def _answer_from_graph(self, state: AgentState) -> Dict[str, Any]:
         evidence = state.get("evidence", [])
         facts = state.get("facts", [])
+        aggregates = state.get("aggregates", [])
         query_result = state.get("query_result")
         plan = state.get("cypher_plan")
         attribute_plan = state.get("attribute_plan")
+        aggregate_plan = state.get("aggregate_plan")
         relation_context_valid = bool(
             evidence
             and plan is not None
@@ -1285,8 +1498,14 @@ LIMIT {limit}
                 attribute_plan.used_entities,
             )
         )
+        aggregate_context_valid = bool(
+            aggregates
+            and aggregate_plan is not None
+        )
         if query_result is None or not (
-            relation_context_valid or attribute_context_valid
+            relation_context_valid
+            or attribute_context_valid
+            or aggregate_context_valid
         ):
             return self._terminal_error(
                 state,
@@ -1295,6 +1514,14 @@ LIMIT {limit}
                 NO_EVIDENCE_ANSWER,
                 "answer_from_graph",
             )
+        if aggregates and not evidence:
+            answer = append_disclaimer(_aggregate_answer(aggregates))
+            _emit_answer_delta(answer)
+            return {
+                "answer": answer,
+                "grounded": True,
+                "stage_events": ["answer_from_graph"],
+            }
         if facts and not evidence:
             answer = append_disclaimer(
                 _context_fallback_answer([], facts)
@@ -1377,9 +1604,12 @@ LIMIT {limit}
             answer,
             evidence,
             facts,
+            state.get("aggregates", []),
         ):
             fallback = append_disclaimer(
-                _context_fallback_answer(evidence, facts)
+                _aggregate_answer(state.get("aggregates", []))
+                if state.get("aggregates")
+                else _context_fallback_answer(evidence, facts)
             )
             return {
                 "answer": fallback,
@@ -1525,7 +1755,11 @@ LIMIT {limit}
             return "finish"
         if state.get("attribute_relation_fallback"):
             return "plan_cypher"
-        if state.get("facts") or state.get("evidence"):
+        if (
+            state.get("aggregates")
+            or state.get("facts")
+            or state.get("evidence")
+        ):
             return "answer_from_graph"
         result = state.get("query_result")
         if result is None or result.row_count == 0:
@@ -1557,9 +1791,11 @@ LIMIT {limit}
             "attribute_plan": None,
             "attribute_query_attempted": False,
             "attribute_relation_fallback": False,
+            "aggregate_plan": None,
             "cypher_plan": None,
             "query_result": None,
             "facts": [],
+            "aggregates": [],
             "error_code": None,
             "error_message": None,
             "last_error_code": None,
@@ -1621,6 +1857,7 @@ LIMIT {limit}
             ),
             evidence=final_state.get("evidence", []),
             facts=final_state.get("facts", []),
+            aggregates=final_state.get("aggregates", []),
             warnings=final_state.get("warnings", []),
             error=err,
             session_id=session_id,
@@ -1710,6 +1947,17 @@ LIMIT {limit}
                                     "items": [
                                         item.model_dump(mode="json")
                                         for item in facts
+                                    ]
+                                },
+                            )
+                        aggregates = update.get("aggregates", [])
+                        if aggregates:
+                            yield GraphQAStreamEvent(
+                                event="aggregates",
+                                data={
+                                    "items": [
+                                        item.model_dump(mode="json")
+                                        for item in aggregates
                                     ]
                                 },
                             )

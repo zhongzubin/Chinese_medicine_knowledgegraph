@@ -42,3 +42,23 @@ def test_parse_sse_lines_accepts_attribute_fact_event():
 
     assert events[0][0] == "facts"
     assert events[0][1]["items"][0]["attribute_label"] == "性味"
+
+
+def test_parse_sse_lines_accepts_aggregate_event():
+    events = list(
+        parse_sse_lines(
+            iter(
+                [
+                    "event: aggregates",
+                    (
+                        'data: {"items":[{"description":"关联到人参的方剂",'
+                        '"count":128}]}'
+                    ),
+                    "",
+                ]
+            )
+        )
+    )
+
+    assert events[0][0] == "aggregates"
+    assert events[0][1]["items"][0]["count"] == 128

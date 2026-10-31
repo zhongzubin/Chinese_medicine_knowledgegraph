@@ -119,6 +119,7 @@ CLI 不读取交互式标准输入。Streamlit 通过 FastAPI 服务接口接入
     }
   ],
   "facts": [],
+  "aggregates": [],
   "warnings": [],
   "error": null
 }
@@ -138,6 +139,7 @@ CLI 不读取交互式标准输入。Streamlit 通过 FastAPI 服务接口接入
   "query": null,
   "evidence": [],
   "facts": [],
+  "aggregates": [],
   "warnings": [],
   "error": {
     "code": "CYPHER_REJECTED",
@@ -270,6 +272,23 @@ AttributeFact
 
 `GraphQAResponse.facts` 为新增可选数组，默认空。该变化属于向后兼容的字段增加，当前 `schema_version` 仍为 `1.0`。
 
+### 4.8 聚合事实
+
+受控一跳计数使用独立结构：
+
+```text
+AggregateFact
+- anchor: str
+- anchor_label: str
+- relationship: str
+- result_label: str
+- direction: outgoing | incoming
+- count: int
+- description: str
+```
+
+聚合查询只允许已存在的 Schema 三元组模式和单跳 `count(DISTINCT ...)`。`GraphQAResponse.aggregates` 默认空数组，不把计数伪装成节点属性或关系证据。
+
 ## 5. 大模型输出契约
 
 ### 5.1 意图分类
@@ -286,9 +305,10 @@ AttributeFact
 查询规划优先级固定为：
 
 1. 属性问题优先使用白名单属性模板，不调用模型生成属性查询。
-2. 高频关系问题在 Schema 方向和问题指向唯一时使用固定关系模板，支持正向和反向查询。
-3. 模板无法唯一覆盖时，才调用模型生成受 Schema 约束的 Text2Cypher。
-4. 所有关系模板和 Text2Cypher 结果都必须经过同一个只读校验器。
+2. 明确的“多少、几个、几种”问题在 Schema 方向和问题指向唯一时使用受控计数模板。
+3. 高频关系问题在 Schema 方向和问题指向唯一时使用固定关系模板，支持正向和反向查询。
+4. 模板无法唯一覆盖时，才调用模型生成受 Schema 约束的 Text2Cypher。
+5. 所有关系模板和 Text2Cypher 结果都必须经过同一个只读校验器。
 
 当属性字段为空且问题涉及“功效”或“主治”时，允许受控回退到对应关系查询；其他属性为空时直接返回无可验证依据。
 
@@ -336,6 +356,7 @@ load_entity_index() -> EntityIndex
 explain(cypher, parameters) -> None | raises QueryValidationError
 execute_read(cypher, parameters, timeout, max_rows) -> QueryResult
 execute_attributes(attribute_plan) -> QueryResult
+execute_aggregate(aggregate_plan) -> QueryResult
 ```
 
 仓储责任：
@@ -344,6 +365,7 @@ execute_attributes(attribute_plan) -> QueryResult
 - 在只读事务中执行查询。
 - 应用超时和结果上限。
 - 属性查询使用固定 Cypher 模板，不接受模型生成的任意属性查询。
+- 聚合查询使用固定单跳计数模板，不允许聚合表达式或标签由模型任意生成。
 - 将驱动返回对象转换为可序列化数据。
 - 不拼接用户输入，不生成 Cypher，不调用大模型。
 
@@ -399,6 +421,7 @@ HTTP 响应不得默认暴露原始提示词、模型隐藏推理和完整数据
 | `stage` | `stage`、中文 `label` |
 | `evidence` | `items` 数组 |
 | `facts` | `items` 数组，属性事实 |
+| `aggregates` | `items` 数组，受控计数结果 |
 | `answer_delta` | `delta` 文本 |
 | `warning` | `message` |
 | `error` | 稳定错误码与消息 |

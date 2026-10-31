@@ -48,10 +48,10 @@ LangGraph 当前包含 16 个节点，主要流程：
   -> 精确名称/别名匹配
      -> 高置信 fuzzy
      -> FAISS Top-3 + 阈值
-  -> 属性模板 / 唯一方向关系模板 / Schema 约束 Cypher
+  -> 属性模板 / 受控聚合 / 唯一方向关系模板 / Schema 约束 Cypher
   -> Guard / EXPLAIN
   -> Neo4j 只读查询
-  -> 属性事实 + 关系证据
+  -> 属性事实 + 聚合结果 + 关系证据
   -> 流式答案 + 证据支持校验
 ```
 
@@ -72,6 +72,7 @@ SSE 是单向的服务端到客户端流，客户端先发送一次普通 POST �
 - `stage`
 - `evidence`
 - `facts`
+- `aggregates`
 - `answer_delta`
 - `warning`
 - `error`
@@ -123,8 +124,8 @@ models/bge-large-zh-v1.5
 | `graph_qa/api_security.py` | 多 API Key 配置和校验 |
 | `graph_qa/streamlit_app.py` | Streamlit 双栏客户端 |
 | `evaluation/qa_cases.jsonl` | 120 条黄金问题 |
-| `evaluation/product_quality_cases.jsonl` | 10 条属性产品集 |
-| `evaluation/multi_turn_cases.jsonl` | 20 组 60 轮多轮固定集 |
+| `evaluation/product_quality_cases.jsonl` | 10 条属性和 4 条聚合产品集 |
+| `evaluation/multi_turn_cases.jsonl` | 20 组 61 轮多轮固定集 |
 | `graph_qa/multi_turn_evaluate.py` | 多轮固定集评测入口 |
 
 ## 8. 必要配置
@@ -158,15 +159,15 @@ uv run streamlit run graph_qa/streamlit_app.py
 
 ## 9. 验证基线
 
-- 当前全量 pytest：`166 passed, 5 skipped`。
+- 当前全量 pytest：`175 passed, 5 skipped`。
 - 真实 Neo4j + 模型集成：本地演示和历史验收已通过；本轮默认 pytest 中按配置跳过。
 - Redis 限流、并发、会话集成：历史验收已通过；本轮默认 pytest 中按配置跳过。
 - 真实跨实例 SSE 会话：历史验收已通过；本轮未重跑。
 - 120 条黄金集完整工作流 outcome：`116/120`。
 - 纯召回 Recall@3：`100%`；完整工作流实体 Recall@3：`98.89%`。
 - 未知实体误召回率：`13.33%`；完整工作流 semantic 路径 Recall@3：`95%`。
-- 属性产品集：10/10 grounded，属性事实匹配率 100%。
-- 多轮固定集：20 组 60 轮，outcome 和实体匹配均为 100%。
+- 属性/聚合产品集：14/14 grounded，属性事实和单跳聚合匹配率均为 100%。
+- 多轮固定集：20 组 61 轮，outcome 和实体匹配均为 100%。
 - 修复前基线：[retrieval-evaluation-2026-10-28.md](retrieval-evaluation-2026-10-28.md)。
 - 本轮修复记录：[retrieval-boundary-fix-2026-10-28.md](retrieval-boundary-fix-2026-10-28.md)。
 - 验收门槛记录：[evaluation-acceptance-2026-10-28.md](evaluation-acceptance-2026-10-28.md)。
@@ -188,12 +189,12 @@ uv run python -m pytest tests/ -v
 - `0.56` 阈值仍有 2 条低分 semantic 未知实体误召回，需后续单独校准。
 - 长未知词子串、通用词语义候选和无关证据 grounded 已完成首轮修复。
 - 属性级 Effect 候选仍可能被 Disease、Symptom 或通用部位词抢占。
-- 属性查询已进入回答上下文；当前覆盖白名单属性、一跳正向和唯一方向反向关系，基础聚合和复杂多跳仍未实现。
+- 属性查询已进入回答上下文；当前覆盖白名单属性、一跳正向/反向关系和单跳计数，多条件聚合和复杂多跳仍未实现。
 - 当前没有显式 `no_evidence` 黄金样本，空结果诚实率标记为未评估。
-- Redis 5 轮会话已通过 20 组、60 轮固定集；更长上下文和跨端用户身份仍不在当前范围。
+- Redis 5 轮会话已通过 20 组、61 轮固定集；更长上下文和跨端用户身份仍不在当前范围。
 - 新会话初始化和失败轮次会话 ID 问题已修复。
 - 答案支持检查是确定性启发式，尚未完成大规模人工事实审核。
-- 属性产品集目前 10 条，总产品评测集尚未达到 200 条目标。
+- 属性和聚合产品集目前 14 条，总产品评测集尚未达到 200 条目标。
 - 本地演示一次上下文追问完整等待约 70 秒，模型阶段仍有延迟波动。
 - 会话作用域是 API 客户端，不是最终登录用户。
 - 当前本地运行目标为单 worker；每个 worker 会重复加载约 1.3GB BGE 模型。
@@ -207,9 +208,9 @@ uv run python -m pytest tests/ -v
 - 边界与 grounded 修复提交：`c99cb6d`。
 - 验收门槛提交：`688d868`。
 - 本地演示版提交：`7be7f3d`（已快进合并到 `main`）。
-- 全量 pytest：`166 passed, 5 skipped`。
-- 专业问答质量 v1 属性产品集：10/10 grounded，属性事实匹配率 100%。
-- 多轮固定集：20 组、60 轮，outcome 和实体匹配均为 100%。
+- 全量 pytest：`175 passed, 5 skipped`。
+- 专业问答质量 v1 属性/聚合产品集：14/14 grounded，事实和聚合匹配率均为 100%。
+- 多轮固定集：20 组、61 轮，outcome 和实体匹配均为 100%。
 - 真实 120 条 outcome：`116/120`；实体 Recall@3：98.89%；grounded 证据覆盖率：100%。
 - Cypher 通过率：100%；查询执行成功率：100%；`acceptance.passed=true`。
 - 专业问答质量 v1 完整记录：[product-quality-validation-2026-10-31.md](product-quality-validation-2026-10-31.md)。
@@ -235,7 +236,7 @@ uv run python -m pytest tests/ -v
 当前优先级：
 
 1. 扩充到 200 条以上独立产品问题集，并开展答案事实人工抽检。
-2. 设计基础聚合查询和受控多跳查询。
+2. 设计多条件聚合和受控多跳查询。
 3. 降低 semantic 误召回和未知实体直接回答。
 4. 补齐真实 Redis/API 跨实例多轮集成验收。
 5. 保持 FastAPI、Streamlit、Redis、LangGraph、Neo4j、BGE + FAISS 和 Cypher Guard 不回归。
@@ -247,13 +248,13 @@ uv run python -m pytest tests/ -v
 - Neo4j 实际有 11,043 个节点和 26,324 条关系。
 - 6 类实体、6 类关系、14 种元数据三元组模式。
 - 当前 120 条评测 outcome 为 116/120。
-- 属性产品集 10/10；多轮固定集 20 组 60 轮全部通过。
+- 属性/聚合产品集 14/14；多轮固定集 20 组 61 轮全部通过。
 - 原 120 条仍没有显式 `no_evidence` 用例；属性集规模也需继续扩大。
 - `Herb` 中约有 1,466 个性味、1,236 个归经、1,219 个用量和 851 个禁忌字段。
 - `Formula` 中约有 741 个主治、619 个功效字段和 604 个用法字段。
 - 来源关系覆盖：药材 412/2,359，方剂 720/1,020。
 
-属性事实进入回答上下文的问题已完成首轮修复。下一阶段重点是聚合/多跳、负样本语义边界和 200 条以上独立评测。
+属性事实和单跳聚合已完成首轮修复。下一阶段重点是复杂多跳、负样本语义边界和 200 条以上独立评测。
 
 ### 12.2 多轮上下文范围
 
@@ -269,7 +270,7 @@ uv run python -m pytest tests/ -v
 - 前端不会保留服务端未成功创建的 `session_id`。
 - 第 6 轮裁剪、TTL、主动清空和跨会话隔离。
 
-当前固定集为 20 组、60 轮，outcome 和实体匹配均为 100%。真实 Redis/API 跨实例测试仍需显式启用。
+当前固定集为 20 组、61 轮，outcome 和实体匹配均为 100%。真实 Redis/API 跨实例测试仍需显式启用。
 
 ### 12.3 产品验收重点
 

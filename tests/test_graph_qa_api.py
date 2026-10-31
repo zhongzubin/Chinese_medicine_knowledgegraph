@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from graph_qa.api import create_app
 from graph_qa.api_security import APIConfigurationError, APISettings
 from graph_qa.models import (
+    AggregateFact,
     AttributeFact,
     ConversationTurn,
     ErrorCode,
@@ -319,6 +320,38 @@ def test_qa_serializes_attribute_facts():
 
     assert response.status_code == 200
     assert response.json()["facts"][0]["attribute_label"] == "性味"
+
+
+def test_qa_serializes_aggregate_facts():
+    engine = FakeEngine(
+        response=GraphQAResponse(
+            question="含有人参的方剂有多少种？",
+            answer="根据当前图谱统计，关联到人参的方剂共有 7 个。",
+            grounded=True,
+            aggregates=[
+                AggregateFact(
+                    anchor="人参",
+                    anchor_label="Herb",
+                    relationship="HAS_INGREDIENT",
+                    result_label="Formula",
+                    direction="incoming",
+                    count=7,
+                    description="关联到人参的方剂",
+                )
+            ],
+        )
+    )
+    store = FakeLimitStore()
+
+    with TestClient(make_app(engine, store)) as client:
+        response = client.post(
+            "/api/v1/qa",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={"question": "含有人参的方剂有多少种？"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["aggregates"][0]["count"] == 7
 
 
 def test_missing_or_wrong_api_key_returns_same_unauthorized_response():

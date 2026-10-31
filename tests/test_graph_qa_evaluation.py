@@ -60,17 +60,18 @@ def test_default_qa_cases_are_valid_and_unique():
     )
 
 
-def test_product_quality_attribute_cases_are_valid():
+def test_product_quality_cases_are_valid():
     cases = load_cases(
         Path("evaluation/product_quality_cases.jsonl")
     )
 
-    assert len(cases) == 10
+    assert len(cases) == 14
     assert {case.category for case in cases} == {
         "herb_attribute",
         "formula_attribute",
+        "aggregate_count",
     }
-    assert all(case.expected_facts for case in cases)
+    assert all(case.expected_facts or case.expected_aggregates for case in cases)
 
 
 def test_evaluate_cases_and_summary_metrics():
@@ -295,6 +296,59 @@ def test_effect_attribute_fact_satisfies_relation_pattern_metric():
     assert summary["pattern_match_rate"] == 1.0
 
 
+def test_expected_aggregate_matches_count_result():
+    case = EvaluationCase(
+        id="aggregate-case",
+        category="aggregate_count",
+        question="含有人参的方剂有多少种？",
+        expected_intent=True,
+        expected_entities=[{"label": "Herb", "name": "人参"}],
+        expected_aggregates=[
+            {
+                "anchor_label": "Herb",
+                "relationship": "HAS_INGREDIENT",
+                "result_label": "Formula",
+                "count": 128,
+            }
+        ],
+        expected_outcome="grounded_answer",
+    )
+    response = GraphQAResponse(
+        question=case.question,
+        answer="根据当前图谱统计，关联到人参的方剂共有 128 个。",
+        grounded=True,
+        linked_entities=[
+            LinkedEntity(
+                label="Herb",
+                name="人参",
+                matched_text="人参",
+                match_type="name",
+                score=1.0,
+            )
+        ],
+        aggregates=[
+            {
+                "anchor": "人参",
+                "anchor_label": "Herb",
+                "relationship": "HAS_INGREDIENT",
+                "result_label": "Formula",
+                "direction": "incoming",
+                "count": 128,
+                "description": "关联到人参的方剂",
+            }
+        ],
+    )
+
+    summary = summarize(
+        evaluate_cases(FakeEvaluationEngine({case.question: response}), [case])
+    )
+
+    assert summary["outcome_accuracy"] == 1.0
+    assert summary["aggregate_cases_evaluated"] == 1
+    assert summary["aggregate_match_rate"] == 1.0
+    assert summary["grounded_evidence_coverage"] == 1.0
+
+
 def test_query_metrics_keep_execution_failure_after_valid_cypher():
     cases = [
         EvaluationCase(
@@ -377,6 +431,7 @@ def test_acceptance_uses_documented_thresholds_not_outcome_100():
     assert acceptance["failed_metrics"] == []
     assert acceptance["not_evaluated_metrics"] == [
         "fact_match_rate",
+        "aggregate_match_rate",
         "empty_result_honesty_rate"
     ]
 

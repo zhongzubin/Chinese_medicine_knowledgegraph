@@ -7,6 +7,7 @@ from argparse import Namespace
 from graph_qa import cli
 from graph_qa.cli import CLIConfigError, parse_args, render_text, run
 from graph_qa.models import (
+    AggregateFact,
     AttributeFact,
     ErrorCode,
     Evidence,
@@ -94,6 +95,30 @@ def test_render_text_includes_attribute_fact_and_source():
     assert "图谱属性" in output
     assert "性味：辛、微苦，温" in output
     assert "《中药大辞典》" in output
+
+
+def test_render_text_includes_aggregate_result():
+    response = GraphQAResponse(
+        question="含有人参的方剂有多少种？",
+        answer="根据当前图谱统计，关联到人参的方剂共有 7 个。",
+        grounded=True,
+        aggregates=[
+            AggregateFact(
+                anchor="人参",
+                anchor_label="Herb",
+                relationship="HAS_INGREDIENT",
+                result_label="Formula",
+                direction="incoming",
+                count=7,
+                description="关联到人参的方剂",
+            )
+        ],
+    )
+
+    output = render_text(response)
+
+    assert "图谱统计" in output
+    assert "关联到人参的方剂：7" in output
 
 
 def test_run_json_output_and_closes_repository():

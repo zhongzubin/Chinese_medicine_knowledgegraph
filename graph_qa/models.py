@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 EntityLabel = Literal["Herb", "Formula", "Disease", "Symptom", "Effect", "Source"]
 MatchType = Literal["name", "alias", "fuzzy", "semantic"]
+AggregateDirection = Literal["outgoing", "incoming"]
 
 MEDICAL_DISCLAIMER = "以上内容仅供中医药知识参考，不能替代专业医疗诊断和治疗。"
 
@@ -120,6 +121,15 @@ class AttributeQueryPlan(StrictModel):
     expected_result_shape: Literal["attribute_values"] = "attribute_values"
 
 
+class AggregateQueryPlan(StrictModel):
+    subject_label: EntityLabel
+    relationship: str = Field(min_length=1, max_length=80)
+    object_label: EntityLabel
+    used_entities: List[UsedEntityRef] = Field(min_length=1)
+    direction: AggregateDirection
+    description: str = Field(min_length=1, max_length=160)
+
+
 class ConversationTurn(StrictModel):
     question: str = Field(min_length=1, max_length=500)
     answer: str = Field(min_length=1, max_length=10000)
@@ -205,6 +215,16 @@ class AttributeFact(StrictModel):
     source: Optional[str] = Field(default=None, max_length=1000)
 
 
+class AggregateFact(StrictModel):
+    anchor: str = Field(min_length=1, max_length=100)
+    anchor_label: EntityLabel
+    relationship: str = Field(min_length=1, max_length=80)
+    result_label: EntityLabel
+    direction: AggregateDirection
+    count: int = Field(ge=0)
+    description: str = Field(min_length=1, max_length=160)
+
+
 class ErrorInfo(StrictModel):
     code: ErrorCode
     message: str
@@ -221,6 +241,7 @@ class GraphQAResponse(StrictModel):
     query: Optional[QueryInfo] = None
     evidence: List[Evidence] = Field(default_factory=list)
     facts: List[AttributeFact] = Field(default_factory=list)
+    aggregates: List[AggregateFact] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     error: Optional[ErrorInfo] = None
     session_id: Optional[str] = None
@@ -232,6 +253,7 @@ class GraphQAStreamEvent(StrictModel):
         "stage",
         "evidence",
         "facts",
+        "aggregates",
         "answer_delta",
         "warning",
         "error",

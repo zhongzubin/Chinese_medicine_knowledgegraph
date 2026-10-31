@@ -6,6 +6,7 @@ from typing import List, Sequence
 from graph_qa.entity_linker import EntityIndex, EntityRecord
 from graph_qa.llm import ReasonerError
 from graph_qa.models import (
+    AggregateFact,
     AttributeFact,
     ConversationTurn,
     CypherPlan,
@@ -260,12 +261,14 @@ class FakeReasoner:
 
 
 class FakeRepository:
-    def __init__(self, rows=ROWS, attribute_rows=None):
+    def __init__(self, rows=ROWS, attribute_rows=None, aggregate_count=4):
         self.rows = rows
         self.attribute_rows = attribute_rows or []
+        self.aggregate_count = aggregate_count
         self.explain_calls = 0
         self.execute_calls = 0
         self.attribute_calls = 0
+        self.aggregate_calls = 0
         self.closed = False
 
     def load_entity_index(self):
@@ -294,6 +297,21 @@ class FakeRepository:
             row_count=len(self.attribute_rows),
             elapsed_ms=1,
             limit_applied=20,
+        )
+
+    def execute_aggregate(self, plan) -> QueryResult:
+        self.aggregate_calls += 1
+        result = "object" if plan.direction == "outgoing" else "subject"
+        return QueryResult(
+            cypher=(
+                "MATCH (subject)-[relationship]->(object) "
+                f"RETURN count(DISTINCT {result}) AS count"
+            ),
+            parameters={"entity_names": [item.name for item in plan.used_entities]},
+            rows=[{"count": self.aggregate_count}],
+            row_count=1,
+            elapsed_ms=1,
+            limit_applied=1,
         )
 
     def close(self):
@@ -493,6 +511,80 @@ def test_reverse_formula_lookup_uses_relationship_template():
     assert response.query is not None
     assert "object.name IN $entity_names" in response.query.cypher
     assert reasoner.plan_calls == 0
+
+
+def test_formula_ingredient_count_uses_aggregate_template():
+    reasoner = FakeReasoner(intent=tcm_intent())
+    repository = FakeRepository(aggregate_count=4)
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_formula_index(),
+    )
+
+    response = engine.answer("四君子汤由多少味药材组成？")
+
+    assert response.error is None
+    assert response.grounded is True
+    assert response.aggregates == [
+        AggregateFact(
+            anchor="四君子汤",
+            anchor_label="Formula",
+            relationship="HAS_INGREDIENT",
+            result_label="Herb",
+            direction="outgoing",
+            count=4,
+            description="四君子汤关联的药材",
+        )
+    ]
+    assert "4 个" in response.answer
+    assert reasoner.plan_calls == 0
+    assert reasoner.answer_calls == 0
+    assert repository.aggregate_calls == 1
+
+
+def test_reverse_aggregate_counts_formulas_containing_herb():
+    reasoner = FakeReasoner(intent=tcm_intent())
+    repository = FakeRepository(aggregate_count=7)
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_formula_index(),
+    )
+
+    response = engine.answer("含有人参的方剂有多少种？")
+
+    assert response.grounded is True
+    assert response.aggregates[0].direction == "incoming"
+    assert response.aggregates[0].result_label == "Formula"
+    assert response.aggregates[0].count == 7
+    assert response.query is not None
+    assert "count(DISTINCT subject)" in response.query.cypher
+    assert reasoner.plan_calls == 0
+
+
+def test_stream_answer_emits_aggregate_event_and_count():
+    engine = GraphQAEngine(
+        reasoner=FakeReasoner(intent=tcm_intent()),
+        repository=FakeRepository(aggregate_count=4),
+        schema=make_schema(),
+        entity_index=make_formula_index(),
+    )
+
+    events = list(engine.stream_answer("四君子汤由多少味药材组成？"))
+
+    aggregate_event = next(
+        event for event in events if event.event == "aggregates"
+    )
+    answer_text = "".join(
+        event.data["delta"]
+        for event in events
+        if event.event == "answer_delta"
+    )
+    assert aggregate_event.data["items"][0]["count"] == 4
+    assert "4 个" in answer_text
 
 
 def test_entity_source_question_uses_forward_relationship_direction():

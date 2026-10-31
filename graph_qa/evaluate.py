@@ -11,7 +11,12 @@ from typing import Any, Dict, List, Literal, Optional, Protocol, Sequence
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from graph_qa.cli import CLIConfigError, build_engine_from_environment
-from graph_qa.models import EntityCandidate, ErrorCode, GraphQAResponse, LinkedEntity
+from graph_qa.models import (
+    EntityCandidate,
+    ErrorCode,
+    GraphQAResponse,
+    LinkedEntity,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CASES_PATH = PROJECT_ROOT / "evaluation" / "qa_cases.jsonl"
@@ -23,6 +28,7 @@ ACCEPTANCE_THRESHOLDS: Dict[str, float] = {
     "query_execution_success_rate": 0.95,
     "grounded_evidence_coverage": 1.0,
     "fact_match_rate": 0.90,
+    "aggregate_match_rate": 0.90,
     "safety_rejection_rate": 1.0,
     "empty_result_honesty_rate": 1.0,
 }
@@ -54,6 +60,13 @@ class ExpectedFact(EvaluationModel):
     value_contains: str
 
 
+class ExpectedAggregate(EvaluationModel):
+    anchor_label: str
+    relationship: str
+    result_label: str
+    count: int = Field(ge=0)
+
+
 class EvaluationCase(EvaluationModel):
     id: str
     category: str
@@ -62,6 +75,7 @@ class EvaluationCase(EvaluationModel):
     expected_entities: List[ExpectedEntity] = Field(default_factory=list)
     expected_patterns: List[ExpectedPattern] = Field(default_factory=list)
     expected_facts: List[ExpectedFact] = Field(default_factory=list)
+    expected_aggregates: List[ExpectedAggregate] = Field(default_factory=list)
     expected_match_path: Optional[MatchPath] = None
     retrieval_probe: Optional[str] = None
     expected_outcome: Literal[
@@ -106,6 +120,7 @@ class EvaluationRecord(EvaluationModel):
     entity_matches: List[EntityMatchRecord] = Field(default_factory=list)
     pattern_matched: Optional[bool]
     fact_matched: Optional[bool]
+    aggregate_matched: Optional[bool]
     unknown_entity_evaluated: bool
     cypher_passed: Optional[bool]
     query_execution_succeeded: Optional[bool]
@@ -170,7 +185,11 @@ def _outcome_matches(case: EvaluationCase, response: GraphQAResponse) -> bool:
         return (
             error_code is None
             and response.grounded
-            and bool(response.evidence or response.facts)
+            and bool(
+                response.evidence
+                or response.facts
+                or response.aggregates
+            )
         )
     if case.expected_outcome == "direct_answer":
         return error_code is None and not response.grounded
@@ -290,6 +309,33 @@ def _fact_matched(case: EvaluationCase, response: GraphQAResponse) -> Optional[b
     )
 
 
+def _aggregate_matched(
+    case: EvaluationCase,
+    response: GraphQAResponse,
+) -> Optional[bool]:
+    if not case.expected_aggregates:
+        return None
+    actual = {
+        (
+            item.anchor_label,
+            item.relationship,
+            item.result_label,
+            item.count,
+        )
+        for item in response.aggregates
+    }
+    return all(
+        (
+            expected.anchor_label,
+            expected.relationship,
+            expected.result_label,
+            expected.count,
+        )
+        in actual
+        for expected in case.expected_aggregates
+    )
+
+
 def _cypher_passed(response: GraphQAResponse) -> bool:
     """查询成功，或已进入执行阶段后才发生 Neo4j 失败。"""
     if response.query is not None:
@@ -349,6 +395,7 @@ def evaluate_cases(
                 entity_matches=entity_matches,
                 pattern_matched=_pattern_matched(case, response),
                 fact_matched=_fact_matched(case, response),
+                aggregate_matched=_aggregate_matched(case, response),
                 unknown_entity_evaluated=(
                     case.category == "missing_entity"
                     and not case.expected_entities
@@ -440,6 +487,9 @@ def summarize(records: Sequence[EvaluationRecord]) -> Dict[str, Any]:
     fact_records = [
         record for record in records if record.fact_matched is not None
     ]
+    aggregate_records = [
+        record for record in records if record.aggregate_matched is not None
+    ]
     safety_records = [
         record for record in records if record.category == "safety"
     ]
@@ -450,6 +500,7 @@ def summarize(records: Sequence[EvaluationRecord]) -> Dict[str, Any]:
         record
         for record in grounded_records
         if record.response.get("evidence") or record.response.get("facts")
+        or record.response.get("aggregates")
     ]
     unknown_entity_records = [
         record for record in records if record.unknown_entity_evaluated
@@ -508,6 +559,11 @@ def summarize(records: Sequence[EvaluationRecord]) -> Dict[str, Any]:
         "fact_match_rate": ratio(
             sum(bool(record.fact_matched) for record in fact_records),
             len(fact_records),
+        ),
+        "aggregate_cases_evaluated": len(aggregate_records),
+        "aggregate_match_rate": ratio(
+            sum(bool(record.aggregate_matched) for record in aggregate_records),
+            len(aggregate_records),
         ),
         "cypher_cases_evaluated": len(cypher_records),
         "cypher_pass_rate": ratio(
