@@ -1,10 +1,10 @@
 # 专业问答质量 v1 首轮实现与验收记录
 
-> 验收完成：2026-10-31
+> 验收完成：2026-10-31，补充验收：2026-11-01
 >
 > 对应规划：[product-quality-roadmap.md](product-quality-roadmap.md)
 >
-> 范围：属性证据、聚合、多条件结果列表、受控两跳、多轮上下文、答案支持校验和 Agent 基础层
+> 范围：属性证据、聚合、多条件结果列表、受控两跳、多轮上下文、证据审核 Agent 和用户可见回答校验
 
 ## 1. 实现范围
 
@@ -28,13 +28,17 @@
 - 产品集增加 1 条多条件结果列表和 2 条受控两跳用例。
 - 新增 `QAAgentTeam`、`AgentDescriptor` 和 `AgentRegistry`，将 16 个公开工作流阶段映射到六个角色。
 - 对话改写、意图分类、实体抽取和回答生成改为通过角色对象调用；SSE `stage` 携带 `agent`。
+- 新增真实 `EvidenceAuditAgent`，逐项核对关系、属性、统计和路径证据覆盖。
+- 新增 `AnswerVerification`，返回通过/回退状态、已核对/已匹配数量、各类证据数量和缺失来源数。
+- API 增加 `verification`，SSE 增加 `audit`，CLI 增加回答校验输出，Streamlit 增加“回答校验”区域。
+- 浏览器验收发现“部分属性命中被误判通过”，已修正为全部证据逐项覆盖后才显示 `passed`。
 
 本轮未完成：
 
 - 任意深度、任意关系组合或动态规划的复杂多跳查询。
 - 200 条以上产品级固定集。
 - 独立事实验证 Agent 或人工领域专家大规模验收。
-- 独立 Agent 子图、动态调度和完全自治协作。`retrieval`、`evidence_audit` 当前仍是声明式角色。
+- 独立 Agent 子图、动态调度和完全自治协作。`retrieval` 当前仍是声明式角色。
 
 ## 2. 自动化测试
 
@@ -46,7 +50,7 @@ uv run python -m pytest tests/ -v
 
 结果：
 
-- `194 passed`
+- `200 passed`
 - `5 skipped`
 - `3 warnings`
 
@@ -79,8 +83,10 @@ uv run python -m pytest tests/ -v
 | Cypher 通过率 | 100% |
 | 查询执行成功率 | 100% |
 | grounded 覆盖率 | 100% |
-| P50 | 94 ms |
-| P95 | 122 ms |
+| 回答审核覆盖率 | 100%，19/19 |
+| 逐项证据覆盖匹配率 | 100%，19/19 |
+| P50 | 64 ms |
+| P95 | 332 ms |
 
 `acceptance.passed=true`。
 
@@ -139,7 +145,7 @@ uv run python -m graph_qa.evaluate `
 
 `acceptance.passed=true`。
 
-本次 120 条回归 P50/P95 为 3,689/12,687 ms，主要受复杂关系问题模型调用影响；19 条产品固定集的确定性扩展路径 P95 为 122 ms。
+本次 120 条回归 P50/P95 为 3,689/12,687 ms，主要受复杂关系问题模型调用影响；2026-11-01 最终 19 条产品固定集 P50/P95 为 64/332 ms。
 
 已知剩余失败：
 
@@ -164,6 +170,8 @@ uv run python -m graph_qa.evaluate `
 9. 输入“同时含有人参和白术的方剂有哪些？”，返回 45 个结果，首个结果为三痹汤，并展示每个结果对应的人参、白术 `HAS_INGREDIENT` 证据。
 10. 输入“四君子汤所含药材有什么功效？”，返回人参、甘草、白术、茯苓的功效分组。
 11. 展开“多跳证据”，确认每条记录包含 `Formula -HAS_INGREDIENT-> Herb -HAS_EFFECT-> Effect` 和来源。
+12. 输入“麻黄性味归经是什么？”，展开“回答校验”。
+13. 确认页面显示审核 Agent、`2/2` 证据覆盖、属性 2 项、缺失来源 2 项，并展示性味和归经两项事实。
 
 截图：
 
@@ -172,6 +180,7 @@ output/playwright/product-quality-final-2026-10-31.png
 output/playwright/aggregate-final-2026-10-31.png
 output/playwright/multi-condition-final-2026-10-31.png
 output/playwright/multi-hop-final-2026-10-31.png
+output/playwright/answer-audit-final-2026-11-01.png
 ```
 
 输出目录属于本地验收产物，不提交 Git。
@@ -186,6 +195,8 @@ output/playwright/multi-hop-final-2026-10-31.png
 - 多条件列表使用固定交集查询，结果和证据不依赖模型自由排序。
 - 四种白名单两跳路径可以返回逐跳可核查证据。
 - Agent 角色注册和阶段映射已经建立，模型调用具有明确职责边界。
+- 证据审核已成为真实确定性 Agent，能阻止部分覆盖回答被误标为通过。
+- 用户可以直接查看审核状态、逐项覆盖数量和缺失来源数量。
 - 多轮上下文通过 62 轮真实评测。
 - grounded 回答具有属性或关系证据。
 - 失败轮次可以恢复，不产生不可用会话。
@@ -195,7 +206,7 @@ output/playwright/multi-hop-final-2026-10-31.png
 - 已支持全部中医药开放问题。
 - 已完成临床级事实审核。
 - 已覆盖任意深度多跳、动态路径规划或复杂比较问题。
-- 已完成独立 Agent 子图和动态调度。
+- 已完成检索规划 Agent 的独立子图和动态调度。
 - 已具备 200 条以上独立产品评测结论。
 
-下一轮应在保持查询安全边界的前提下，扩充真实问题集和答案事实性人工抽检，并把检索规划、证据审核从声明式角色演进为可测试的独立 Agent。
+下一轮应在保持查询安全边界的前提下，扩充真实问题集和答案事实性人工抽检，把检索规划演进为可测试的独立 Agent，并为证据审核增加语义等价和人工抽检能力。

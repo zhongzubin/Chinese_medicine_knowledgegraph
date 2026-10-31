@@ -3,7 +3,7 @@
 > 文档状态：当前实现基线 v1.1
 >
 > 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit、查询扩展与 Agent 基础层
-> 最后更新：2026-10-31
+> 最后更新：2026-11-01
 
 本文定义 CLI、内部模块、FastAPI、Redis 会话、SSE 和 Streamlit 客户端必须遵守的当前契约。
 
@@ -121,6 +121,7 @@ CLI 不读取交互式标准输入。Streamlit 通过 FastAPI 服务接口接入
   "facts": [],
   "aggregates": [],
   "paths": [],
+  "verification": null,
   "warnings": [],
   "error": null
 }
@@ -142,6 +143,7 @@ CLI 不读取交互式标准输入。Streamlit 通过 FastAPI 服务接口接入
   "facts": [],
   "aggregates": [],
   "paths": [],
+  "verification": null,
   "warnings": [],
   "error": {
     "code": "CYPHER_REJECTED",
@@ -342,6 +344,33 @@ PathEvidence
 
 两步节点链必须连续，每一步都必须通过 Schema 校验。`GraphQAResponse.paths` 默认空数组；任意深度、变量长度路径和模型自由规划不在当前契约内。
 
+### 4.11 回答校验
+
+图谱回答经过确定性证据审核后返回：
+
+```text
+AnswerVerification
+- status: passed | fallback
+- agent: evidence_audit
+- checked_items: int
+- matched_items: int
+- evidence_items: int
+- fact_items: int
+- aggregate_items: int
+- path_items: int
+- missing_sources: int
+- fallback_used: bool
+- message: str
+```
+
+- `checked_items` 是本轮可核对的关系、属性、统计和路径条目总数。
+- `matched_items` 是原回答逐项覆盖的条目数。
+- 只有 `matched_items == checked_items` 且存在待核对条目时，`status` 才为 `passed`。
+- 覆盖不完整、空回答或缺少待核对条目时，系统使用证据化回答，`status=fallback`、`fallback_used=true`。
+- `missing_sources` 统计关系、属性和路径条目中 `source=null` 的数量；统计结果不单独计入来源缺失。
+
+该审核只做确定性文本覆盖检查，不是模型自由评分，也不等价于完整医学事实审核。`GraphQAResponse.verification` 默认为空；只有进入图谱回答审核的工作流才设置。
+
 ## 5. 大模型输出契约
 
 ### 5.1 意图分类
@@ -400,7 +429,7 @@ PathEvidence
 
 回答节点输出纯文本。输入可以同时包含关系 `Evidence` 和属性 `AttributeFact`。引用内容由程序根据两类证据渲染，不由模型自行编造引用编号。涉及来源时使用图谱中的 `Source.name`。
 
-回答生成后必须执行证据支持检查。若模型回答没有包含任何本轮对象事实或属性值，系统应替换为基于证据的简化回答并返回警告。
+回答生成后必须执行逐项证据支持检查。回答需要覆盖全部本轮关系对象、属性事实、统计描述和路径节点；部分覆盖或空回答应替换为基于证据的简化回答并返回警告及结构化 `verification`。
 
 ## 6. Neo4j 仓储接口
 
@@ -482,6 +511,7 @@ HTTP 响应不得默认暴露原始提示词、模型隐藏推理和完整数据
 | `facts` | `items` 数组，属性事实 |
 | `aggregates` | `items` 数组，受控计数结果 |
 | `paths` | `items` 数组，受控多跳路径 |
+| `audit` | 完整 `AnswerVerification` 对象 |
 | `answer_delta` | `delta` 文本 |
 | `warning` | `message` |
 | `error` | 稳定错误码与消息 |
@@ -517,6 +547,7 @@ M1 CLI 和评测继续使用无会话调用，不依赖 Redis 会话状态。
 
 - 结果对象增加字段允许向后兼容，删除或重命名字段需要升级 `schema_version`。
 - `GraphQAResponse.paths` 和 SSE `paths` 是向后兼容的新增字段。
+- `GraphQAResponse.verification` 和 SSE `audit` 是向后兼容的新增字段。
 - SSE `stage.data.agent` 是向后兼容的新增字段，调用方不应依赖固定阶段数量。
 - 安全错误码不得改为“成功但无结果”。
 - 图元数据版本变化时，必须运行实体索引和黄金问题集回归。

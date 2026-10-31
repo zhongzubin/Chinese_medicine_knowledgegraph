@@ -3,7 +3,7 @@
 > 文档状态：当前实现基线 v1.1
 >
 > 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit、查询扩展与 Agent 基础层
-> 最后更新：2026-10-31
+> 最后更新：2026-11-01
 
 ## 1. 架构目标
 
@@ -63,6 +63,7 @@ flowchart TB
 | `state.py` | LangGraph 状态定义和初始化 | 持久化会话 |
 | `prompts.py` | 意图、实体抽取、Cypher 生成和回答提示词 | 读取数据库 |
 | `agents/` | Agent 描述、唯一注册表、角色对象和阶段映射 | 改变 Cypher 安全边界或替代确定性查询 |
+| `agents/evidence_audit.py` | 逐项证据覆盖、缺失来源统计和证据化回退 | 自由判断医学事实或放宽证据边界 |
 | `entity_linker.py` | 名称规范化、别名索引、候选匹配 | 自行生成实体名称 |
 | `cypher_guard.py` | 单语句、只读、元数据白名单、LIMIT 和参数检查 | 执行查询 |
 | `neo4j_repository.py` | 元数据加载、图实体读取、属性/聚合模板、`EXPLAIN` 和只读查询 | 生成回答 |
@@ -105,6 +106,7 @@ flowchart TB
 | `facts` | 支持回答的属性事实 |
 | `aggregates` | 受控计数结果 |
 | `paths` | 受控两跳的逐跳路径证据 |
+| `verification` | 本轮回答审核状态、覆盖计数和来源统计 |
 | `answer` | 最终回答 |
 | `warnings` | 检索范围、模型降级等用户可见提示 |
 | `error_code` | 稳定错误码 |
@@ -123,9 +125,9 @@ flowchart TB
 | `entity` | `extract_entities`、`link_entities` | 模型候选抽取通过角色对象完成，最终链接由确定性链接器确认 |
 | `retrieval` | `plan_cypher`、`validate_cypher`、`execute_cypher` | 声明式职责边界；当前查询计划、Guard 和仓储执行仍由工作流确定性代码完成 |
 | `answer` | `answer_from_graph`、`direct_answer` | 图谱回答和直接回答通过角色对象调用模型，失败时使用证据化降级 |
-| `evidence_audit` | `verify_answer`、`clarify`、`no_evidence`、`safe_fail`、`finish` | 声明式职责边界；当前审核、澄清和失败收口仍为确定性代码 |
+| `evidence_audit` | `verify_answer`、`clarify`、`no_evidence`、`safe_fail`、`finish` | 真实确定性 Agent；核对全部本轮证据并使用证据化回退，其余阶段仍由工作流收口 |
 
-该注册表提供重复 Agent、重复阶段和未知阶段的明确错误。SSE `stage` 事件携带阶段对应的 `agent`，但当前 LangGraph 仍是 16 个固定节点，不是独立 Agent 子图或动态调度系统。
+该注册表提供重复 Agent、重复阶段和未知阶段的明确错误。SSE `stage` 事件携带阶段对应的 `agent`，审核完成后另有 `audit` 事件。当前 LangGraph 仍是 16 个固定节点，不是独立 Agent 子图或动态调度系统。
 
 ### 4.3 路由
 
@@ -283,7 +285,7 @@ M1 使用 Python 标准库实现字符串相似度。当前 M3 扩展增加本�
 
 如果查询成功但无结果，返回固定语义的“当前图谱没有找到相关依据”，不调用模型猜测答案。
 
-回答生成后增加确定性支持检查：回答至少需要包含本轮一个关系对象、属性值、聚合描述或路径节点；否则替换为基于证据的简化回答。关系多来源会合并到同一条证据中展示。
+回答生成后由 `EvidenceAuditAgent` 逐项检查回答是否覆盖本轮全部关系对象、属性值、聚合描述和路径节点；未完整覆盖或回答为空时替换为基于证据的简化回答。审核结果同时记录已核对/已匹配数量、缺失来源数和是否使用回退，并通过 API、SSE、CLI 和 Streamlit 展示。该检查是确定性文本覆盖，不宣称完成语义等价或医学事实审核。关系多来源会合并到同一条证据中展示。
 
 ## 10. 关键设计决策
 
@@ -380,7 +382,8 @@ flowchart LR
 - 任意深度、任意关系组合和由模型动态规划的复杂多跳查询。
 - 更大规模、独立真实问题的属性与多轮评测集。
 - 人工或规则化的答案关键事实准确率评估。
-- 检索规划与证据审核 Agent 的独立输入输出契约、拓扑和动态调度。
+- 检索规划 Agent 的独立输入输出契约、拓扑和动态调度。
+- 回答审核的语义等价判断和大规模人工事实抽检。
 
 实现必须保持以下不变量：
 
