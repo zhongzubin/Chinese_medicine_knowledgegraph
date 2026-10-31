@@ -262,15 +262,26 @@ class FakeReasoner:
 
 
 class FakeRepository:
-    def __init__(self, rows=ROWS, attribute_rows=None, aggregate_count=4):
+    def __init__(
+        self,
+        rows=ROWS,
+        attribute_rows=None,
+        aggregate_count=4,
+        multi_condition_rows=None,
+        multi_hop_rows=None,
+    ):
         self.rows = rows
         self.attribute_rows = attribute_rows or []
         self.aggregate_count = aggregate_count
+        self.multi_condition_rows = multi_condition_rows or []
+        self.multi_hop_rows = multi_hop_rows or []
         self.explain_calls = 0
         self.execute_calls = 0
         self.attribute_calls = 0
         self.aggregate_calls = 0
         self.aggregate_plans = []
+        self.multi_condition_calls = 0
+        self.multi_hop_calls = 0
         self.closed = False
 
     def load_entity_index(self):
@@ -329,6 +340,36 @@ class FakeRepository:
             row_count=1,
             elapsed_ms=1,
             limit_applied=1,
+        )
+
+    def execute_multi_condition_list(self, plan) -> QueryResult:
+        self.multi_condition_calls += 1
+        return QueryResult(
+            cypher="MATCH (subject) WHERE EXISTS { MATCH (subject) }",
+            parameters={
+                f"entity_{index}": entity.name
+                for index, entity in enumerate(plan.used_entities)
+            },
+            rows=list(self.multi_condition_rows),
+            row_count=len(self.multi_condition_rows),
+            elapsed_ms=1,
+            limit_applied=20,
+        )
+
+    def execute_multi_hop(self, plan) -> QueryResult:
+        self.multi_hop_calls += 1
+        return QueryResult(
+            cypher="MATCH (root)-[first]->(middle)-[second]->(target)",
+            parameters={
+                "entity_names": [
+                    entity.name
+                    for entity in plan.used_entities
+                ]
+            },
+            rows=list(self.multi_hop_rows),
+            row_count=len(self.multi_hop_rows),
+            elapsed_ms=1,
+            limit_applied=20,
         )
 
     def close(self):
@@ -599,6 +640,90 @@ def test_multi_condition_aggregate_requires_both_herbs():
     assert response.aggregates[0].description == "同时关联到人参、白术的方剂"
     assert repository.aggregate_plans[0].require_all_entities is True
     assert reasoner.plan_calls == 0
+
+
+def test_multi_condition_list_returns_matching_formulas_and_evidence():
+    reasoner = FakeReasoner(intent=tcm_intent())
+    repository = FakeRepository(
+        multi_condition_rows=[
+            {
+                "subject": "四君子汤",
+                "subject_label": "Formula",
+                "conditions": [
+                    {
+                        "relationship": "HAS_INGREDIENT",
+                        "object": "人参",
+                        "object_label": "Herb",
+                        "sources": [],
+                    },
+                    {
+                        "relationship": "HAS_INGREDIENT",
+                        "object": "白术",
+                        "object_label": "Herb",
+                        "sources": [],
+                    },
+                ],
+            }
+        ]
+    )
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_formula_index(),
+    )
+
+    response = engine.answer("同时含有人参和白术的方剂有哪些？")
+
+    assert response.grounded is True
+    assert response.answer.startswith(
+        "根据当前图谱，同时关联到人参、白术的方剂如下："
+    )
+    assert "四君子汤" in response.answer
+    assert {(item.object) for item in response.evidence} == {
+        "人参",
+        "白术",
+    }
+    assert repository.multi_condition_calls == 1
+    assert reasoner.plan_calls == 0
+    assert reasoner.answer_calls == 0
+
+
+def test_multi_hop_question_returns_paths_and_deterministic_answer():
+    reasoner = FakeReasoner(intent=tcm_intent())
+    repository = FakeRepository(
+        multi_hop_rows=[
+            {
+                "root": "四君子汤",
+                "root_label": "Formula",
+                "first_relationship": "HAS_INGREDIENT",
+                "intermediate": "人参",
+                "intermediate_label": "Herb",
+                "second_relationship": "HAS_EFFECT",
+                "target": "补气",
+                "target_label": "Effect",
+                "sources": [],
+            }
+        ]
+    )
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_formula_index(),
+    )
+
+    response = engine.answer("四君子汤所含药材有什么功效？")
+
+    assert response.grounded is True
+    assert response.error is None
+    assert len(response.paths) == 1
+    assert response.paths[0].intermediate == "人参"
+    assert response.paths[0].target == "补气"
+    assert "人参：补气" in response.answer
+    assert repository.multi_hop_calls == 1
+    assert reasoner.plan_calls == 0
+    assert reasoner.answer_calls == 0
 
 
 def test_stream_answer_emits_aggregate_event_and_count():

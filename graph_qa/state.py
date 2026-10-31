@@ -15,6 +15,9 @@ from graph_qa.models import (
     Evidence,
     IntentResult,
     LinkedEntity,
+    MultiConditionQueryPlan,
+    MultiHopQueryPlan,
+    PathEvidence,
     QueryResult,
 )
 
@@ -36,6 +39,8 @@ class AgentState(TypedDict, total=False):
     attribute_query_attempted: bool
     attribute_relation_fallback: bool
     aggregate_plan: Optional[AggregateQueryPlan]
+    multi_condition_plan: Optional[MultiConditionQueryPlan]
+    multi_hop_plan: Optional[MultiHopQueryPlan]
     cypher_plan: Optional[CypherPlan]
     query_attempts: int
     validation_errors: Annotated[List[str], operator.add]
@@ -49,6 +54,7 @@ class AgentState(TypedDict, total=False):
     evidence: List[Evidence]
     facts: List[AttributeFact]
     aggregates: List[AggregateFact]
+    paths: List[PathEvidence]
     answer: str
     grounded: bool
     warnings: Annotated[List[str], operator.add]

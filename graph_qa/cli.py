@@ -228,6 +228,17 @@ def render_text(response: GraphQAResponse, show_query: bool = False) -> str:
         lines.extend(["", "图谱统计："])
         for item in response.aggregates:
             lines.append(f"- {item.description}：{item.count}")
+    if response.paths:
+        lines.extend(["", "多跳路径："])
+        for item in response.paths:
+            source = f"（来源：{item.source}）" if item.source else ""
+            lines.append(
+                f"- ({item.root}:{item.root_label})"
+                f"-[{item.first_relationship}]->"
+                f"({item.intermediate}:{item.intermediate_label})"
+                f"-[{item.second_relationship}]->"
+                f"({item.target}:{item.target_label}){source}"
+            )
     if response.evidence:
         lines.extend(["", "图谱证据："])
         for item in response.evidence:

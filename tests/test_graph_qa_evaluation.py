@@ -65,13 +65,20 @@ def test_product_quality_cases_are_valid():
         Path("evaluation/product_quality_cases.jsonl")
     )
 
-    assert len(cases) == 16
+    assert len(cases) == 19
     assert {case.category for case in cases} == {
         "herb_attribute",
         "formula_attribute",
         "aggregate_count",
+        "multi_condition_list",
+        "multi_hop",
     }
-    assert all(case.expected_facts or case.expected_aggregates for case in cases)
+    assert all(
+        case.expected_facts
+        or case.expected_aggregates
+        or case.expected_answer_contains
+        for case in cases
+    )
 
 
 def test_evaluate_cases_and_summary_metrics():
@@ -349,6 +356,120 @@ def test_expected_aggregate_matches_count_result():
     assert summary["grounded_evidence_coverage"] == 1.0
 
 
+def test_multi_condition_list_metrics_check_answer_and_evidence_objects():
+    case = EvaluationCase(
+        id="multi-condition-list",
+        category="multi_condition_list",
+        question="同时含有人参和白术的方剂有哪些？",
+        expected_intent=True,
+        expected_entities=[
+            {"label": "Herb", "name": "人参"},
+            {"label": "Herb", "name": "白术"},
+        ],
+        expected_patterns=[
+            {
+                "subject_label": "Formula",
+                "relationship": "HAS_INGREDIENT",
+                "object_label": "Herb",
+            }
+        ],
+        expected_answer_contains=["三痹汤"],
+        expected_evidence_objects=["人参", "白术"],
+        expected_outcome="grounded_answer",
+    )
+    response = GraphQAResponse(
+        question=case.question,
+        answer="根据当前图谱，同时关联到人参、白术的方剂如下：\n- 三痹汤",
+        grounded=True,
+        linked_entities=[
+            LinkedEntity(
+                label="Herb",
+                name="人参",
+                matched_text="人参",
+                match_type="name",
+                score=1.0,
+            ),
+            LinkedEntity(
+                label="Herb",
+                name="白术",
+                matched_text="白术",
+                match_type="name",
+                score=1.0,
+            ),
+        ],
+        evidence=[
+            Evidence(
+                subject="三痹汤",
+                subject_label="Formula",
+                relationship="HAS_INGREDIENT",
+                object="人参",
+                object_label="Herb",
+            ),
+            Evidence(
+                subject="三痹汤",
+                subject_label="Formula",
+                relationship="HAS_INGREDIENT",
+                object="白术",
+                object_label="Herb",
+            ),
+        ],
+    )
+
+    summary = summarize(
+        evaluate_cases(FakeEvaluationEngine({case.question: response}), [case])
+    )
+
+    assert summary["answer_contains_match_rate"] == 1.0
+    assert summary["evidence_object_match_rate"] == 1.0
+    assert summary["pattern_match_rate"] == 1.0
+
+
+def test_expected_multi_hop_path_matches_response():
+    case = EvaluationCase(
+        id="multi-hop-path",
+        category="multi_hop",
+        question="四君子汤所含药材有什么功效？",
+        expected_intent=True,
+        expected_entities=[{"label": "Formula", "name": "四君子汤"}],
+        expected_paths=[
+            {
+                "root_label": "Formula",
+                "root_name": "四君子汤",
+                "first_relationship": "HAS_INGREDIENT",
+                "intermediate_label": "Herb",
+                "second_relationship": "HAS_EFFECT",
+                "target_label": "Effect",
+            }
+        ],
+        expected_outcome="grounded_answer",
+    )
+    response = GraphQAResponse(
+        question=case.question,
+        answer="四君子汤中的人参可养血。",
+        grounded=True,
+        paths=[
+            {
+                "root": "四君子汤",
+                "root_label": "Formula",
+                "first_relationship": "HAS_INGREDIENT",
+                "intermediate": "人参",
+                "intermediate_label": "Herb",
+                "second_relationship": "HAS_EFFECT",
+                "target": "养血",
+                "target_label": "Effect",
+            }
+        ],
+    )
+
+    summary = summarize(
+        evaluate_cases(FakeEvaluationEngine({case.question: response}), [case])
+    )
+
+    assert summary["path_cases_evaluated"] == 1
+    assert summary["path_match_rate_product"] == 1.0
+    assert summary["grounded_evidence_coverage"] == 1.0
+
+
 def test_query_metrics_keep_execution_failure_after_valid_cypher():
     cases = [
         EvaluationCase(
@@ -432,6 +553,9 @@ def test_acceptance_uses_documented_thresholds_not_outcome_100():
     assert acceptance["not_evaluated_metrics"] == [
         "fact_match_rate",
         "aggregate_match_rate",
+        "answer_contains_match_rate",
+        "evidence_object_match_rate",
+        "path_match_rate_product",
         "empty_result_honesty_rate"
     ]
 

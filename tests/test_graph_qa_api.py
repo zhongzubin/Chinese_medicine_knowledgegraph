@@ -17,6 +17,7 @@ from graph_qa.models import (
     ErrorCode,
     Evidence,
     GraphQAResponse,
+    PathEvidence,
     QueryInfo,
 )
 from graph_qa.redis_limits import (
@@ -352,6 +353,39 @@ def test_qa_serializes_aggregate_facts():
 
     assert response.status_code == 200
     assert response.json()["aggregates"][0]["count"] == 7
+
+
+def test_qa_serializes_multi_hop_paths():
+    engine = FakeEngine(
+        response=GraphQAResponse(
+            question="四君子汤所含药材有什么功效？",
+            answer="四君子汤所含人参具有补气功效。",
+            grounded=True,
+            paths=[
+                PathEvidence(
+                    root="四君子汤",
+                    root_label="Formula",
+                    first_relationship="HAS_INGREDIENT",
+                    intermediate="人参",
+                    intermediate_label="Herb",
+                    second_relationship="HAS_EFFECT",
+                    target="补气",
+                    target_label="Effect",
+                )
+            ],
+        )
+    )
+    store = FakeLimitStore()
+
+    with TestClient(make_app(engine, store)) as client:
+        response = client.post(
+            "/api/v1/qa",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={"question": "四君子汤所含药材有什么功效？"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["paths"][0]["intermediate"] == "人参"
 
 
 def test_missing_or_wrong_api_key_returns_same_unauthorized_response():

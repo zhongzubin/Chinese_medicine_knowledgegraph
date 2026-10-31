@@ -131,6 +131,26 @@ class AggregateQueryPlan(StrictModel):
     description: str = Field(min_length=1, max_length=160)
 
 
+class MultiConditionQueryPlan(StrictModel):
+    subject_label: EntityLabel
+    relationship: str = Field(min_length=1, max_length=80)
+    object_label: EntityLabel
+    used_entities: List[UsedEntityRef] = Field(min_length=2)
+    description: str = Field(min_length=1, max_length=160)
+
+
+class MultiHopStep(StrictModel):
+    subject_label: EntityLabel
+    relationship: str = Field(min_length=1, max_length=80)
+    object_label: EntityLabel
+
+
+class MultiHopQueryPlan(StrictModel):
+    steps: List[MultiHopStep] = Field(min_length=2, max_length=2)
+    used_entities: List[UsedEntityRef] = Field(min_length=1)
+    description: str = Field(min_length=1, max_length=160)
+
+
 class ConversationTurn(StrictModel):
     question: str = Field(min_length=1, max_length=500)
     answer: str = Field(min_length=1, max_length=10000)
@@ -226,6 +246,18 @@ class AggregateFact(StrictModel):
     description: str = Field(min_length=1, max_length=160)
 
 
+class PathEvidence(StrictModel):
+    root: str = Field(min_length=1, max_length=100)
+    root_label: EntityLabel
+    first_relationship: str = Field(min_length=1, max_length=80)
+    intermediate: str = Field(min_length=1, max_length=100)
+    intermediate_label: EntityLabel
+    second_relationship: str = Field(min_length=1, max_length=80)
+    target: str = Field(min_length=1, max_length=100)
+    target_label: EntityLabel
+    source: Optional[str] = Field(default=None, max_length=1000)
+
+
 class ErrorInfo(StrictModel):
     code: ErrorCode
     message: str
@@ -243,6 +275,7 @@ class GraphQAResponse(StrictModel):
     evidence: List[Evidence] = Field(default_factory=list)
     facts: List[AttributeFact] = Field(default_factory=list)
     aggregates: List[AggregateFact] = Field(default_factory=list)
+    paths: List[PathEvidence] = Field(default_factory=list)
     warnings: List[str] = Field(default_factory=list)
     error: Optional[ErrorInfo] = None
     session_id: Optional[str] = None
@@ -255,6 +288,7 @@ class GraphQAStreamEvent(StrictModel):
         "evidence",
         "facts",
         "aggregates",
+        "paths",
         "answer_delta",
         "warning",
         "error",

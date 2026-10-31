@@ -11,6 +11,7 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
+from graph_qa.agents import QAAgentTeam
 from graph_qa.cypher_guard import CypherGuard, CypherGuardError, detect_unsafe_question
 from graph_qa.entity_linker import EntityIndex
 from graph_qa.llm import QAReasoner, ReasonerError
@@ -28,6 +29,10 @@ from graph_qa.models import (
     GraphQARequest,
     GraphQAResponse,
     IntentResult,
+    MultiConditionQueryPlan,
+    MultiHopQueryPlan,
+    MultiHopStep,
+    PathEvidence,
     QueryInfo,
     append_disclaimer,
 )
@@ -73,7 +78,7 @@ ATTRIBUTE_TERM_MAP: Tuple[Tuple[Tuple[str, ...], Tuple[str, ...]], ...] = (
 RELATION_FALLBACK_ATTRIBUTES = frozenset({"effect", "indication"})
 RELATION_TERM_MAP: Tuple[Tuple[Tuple[str, ...], str], ...] = (
     (
-        ("组成", "成分", "含有", "包含", "由哪些药材"),
+        ("组成", "成分", "含有", "所含", "包含", "由哪些药材"),
         "HAS_INGREDIENT",
     ),
     (("缓解", "改善"), "ALLEVIATES_SYMPTOM"),
@@ -111,6 +116,28 @@ ENTITY_LABEL_DISPLAY_NAMES = {
     "Effect": "功效",
     "Source": "文献",
 }
+MULTI_HOP_CATALOG = (
+    (
+        ("Formula", "HAS_INGREDIENT", "Herb"),
+        ("Herb", "HAS_EFFECT", "Effect"),
+        "所含药材的功效",
+    ),
+    (
+        ("Formula", "HAS_INGREDIENT", "Herb"),
+        ("Herb", "TREATS_DISEASE", "Disease"),
+        "所含药材治疗的疾病",
+    ),
+    (
+        ("Formula", "HAS_INGREDIENT", "Herb"),
+        ("Herb", "ALLEVIATES_SYMPTOM", "Symptom"),
+        "所含药材缓解的症状",
+    ),
+    (
+        ("Herb", "TREATS_DISEASE", "Disease"),
+        ("Disease", "HAS_SYMPTOM", "Symptom"),
+        "治疗疾病的相关症状",
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -429,6 +456,7 @@ def _answer_supported_by_context(
     evidence: Sequence[Evidence],
     facts: Sequence[AttributeFact],
     aggregates: Sequence[AggregateFact] = (),
+    paths: Sequence[PathEvidence] = (),
 ) -> bool:
     normalized_answer = normalize_question(answer)
     candidates: Set[str] = set()
@@ -444,6 +472,9 @@ def _answer_supported_by_context(
     for item in aggregates:
         candidates.add(str(item.count))
         candidates.add(item.description)
+    for item in paths:
+        candidates.add(item.intermediate)
+        candidates.add(item.target)
     return any(
         len(candidate) >= 2 and candidate in normalized_answer
         for candidate in candidates
@@ -454,6 +485,34 @@ def _aggregate_answer(aggregates: Sequence[AggregateFact]) -> str:
     lines = ["根据当前图谱统计："]
     for item in aggregates:
         lines.append(f"- {item.description}共有 {item.count} 个")
+    return "\n".join(lines)
+
+
+def _multi_hop_answer(
+    plan: MultiHopQueryPlan,
+    paths: Sequence[PathEvidence],
+) -> str:
+    grouped: Dict[str, List[str]] = {}
+    root_by_intermediate: Dict[str, str] = {}
+    second_relationship = plan.steps[1].relationship
+    for item in paths:
+        values = grouped.setdefault(item.intermediate, [])
+        if item.target not in values:
+            values.append(item.target)
+        root_by_intermediate[item.intermediate] = item.root
+    lines = [f"根据当前图谱，{plan.description}如下："]
+    for intermediate, targets in grouped.items():
+        root = root_by_intermediate[intermediate]
+        prefix = f"{root} → " if root != intermediate else ""
+        if second_relationship == "HAS_EFFECT":
+            value = "、".join(targets)
+        elif second_relationship == "TREATS_DISEASE":
+            value = "可治疗" + "、".join(targets)
+        elif second_relationship == "ALLEVIATES_SYMPTOM":
+            value = "可缓解" + "、".join(targets)
+        else:
+            value = "、".join(targets)
+        lines.append(f"- {prefix}{intermediate}：{value}")
     return "\n".join(lines)
 
 
@@ -605,6 +664,7 @@ class GraphQAEngine:
         if entity_limit < 1:
             raise ValueError("entity_limit 必须大于等于 1")
         self.reasoner = reasoner
+        self.agents = QAAgentTeam(reasoner)
         self.repository = repository
         self.schema = schema
         self.entity_index = entity_index or repository.load_entity_index()
@@ -783,14 +843,11 @@ class GraphQAEngine:
                 "stage_events": ["rewrite_question"],
             }
 
-        rewrite = getattr(self.reasoner, "rewrite_question", None)
-        if not callable(rewrite):
-            return {
-                "rewritten_question": question,
-                "stage_events": ["rewrite_question"],
-            }
         try:
-            result = rewrite(question, history)
+            result = self.agents.dialogue.rewrite_question(
+                question,
+                history,
+            )
             rewritten = normalize_question(result.standalone_question)
             if not rewritten or len(rewritten) > 500:
                 raise ValueError("改写后的问题无效")
@@ -829,7 +886,7 @@ class GraphQAEngine:
                 "stage_events": ["classify_intent"],
             }
         try:
-            intent = self.reasoner.classify_intent(_active_question(state))
+            intent = self.agents.intent.classify(_active_question(state))
             return {"intent": intent, "stage_events": ["classify_intent"]}
         except ReasonerError as exc:
             return self._terminal_error(
@@ -855,7 +912,7 @@ class GraphQAEngine:
                 "stage_events": ["extract_entities"],
             }
         try:
-            candidates = self.reasoner.extract_entities(_active_question(state))
+            candidates = self.agents.entity.extract(_active_question(state))
             return {
                 "entity_candidates": candidates,
                 "stage_events": ["extract_entities"],
@@ -1096,6 +1153,115 @@ class GraphQAEngine:
             ),
         )
 
+    def _build_multi_condition_list_plan(
+        self,
+        state: AgentState,
+    ) -> Optional[MultiConditionQueryPlan]:
+        if _is_count_question(_active_question(state)):
+            return None
+        selection = self._select_relationship_pattern(state)
+        if selection is None or selection.direction != "incoming":
+            return None
+        anchor_names = sorted(
+            {item.name for item in selection.entities}
+        )
+        if (
+            len(anchor_names) < 2
+            or not _has_explicit_conjunction(_active_question(state))
+        ):
+            return None
+        return MultiConditionQueryPlan(
+            subject_label=selection.subject_label,
+            relationship=selection.relationship,
+            object_label=selection.object_label,
+            used_entities=[
+                {
+                    "label": item.label,
+                    "name": item.name,
+                }
+                for item in sorted(
+                    selection.entities,
+                    key=lambda entity: (entity.label, entity.name),
+                )
+            ],
+            description=_aggregate_description(
+                anchor_names,
+                selection.subject_label,
+                selection.direction,
+            ),
+        )
+
+    def _build_multi_hop_plan(
+        self,
+        state: AgentState,
+    ) -> Optional[MultiHopQueryPlan]:
+        question = _active_question(state)
+        requested_relations = _requested_relations(question)
+        if len(requested_relations) < 2:
+            return None
+        linked_by_label: Dict[str, List[Any]] = {}
+        for entity in state.get("linked_entities", []):
+            linked_by_label.setdefault(entity.label, []).append(entity)
+
+        candidates = []
+        for first_step, second_step, result_description in MULTI_HOP_CATALOG:
+            if {
+                first_step[1],
+                second_step[1],
+            } - requested_relations:
+                continue
+            entities = linked_by_label.get(first_step[0], [])
+            if not entities:
+                continue
+            try:
+                self.schema.assert_pattern(*first_step)
+                self.schema.assert_pattern(*second_step)
+            except Exception:
+                continue
+            candidates.append((first_step, second_step, result_description, entities))
+        if not candidates:
+            return None
+        unique = {
+            (
+                first_step,
+                second_step,
+                tuple(item.label for item in entities),
+                tuple(item.name for item in entities),
+            ): (first_step, second_step, result_description, entities)
+            for first_step, second_step, result_description, entities in candidates
+        }
+        if len(unique) != 1:
+            return None
+        first_step, second_step, result_description, entities = next(
+            iter(unique.values())
+        )
+        anchor_names = sorted({item.name for item in entities})
+        return MultiHopQueryPlan(
+            steps=[
+                MultiHopStep(
+                    subject_label=first_step[0],
+                    relationship=first_step[1],
+                    object_label=first_step[2],
+                ),
+                MultiHopStep(
+                    subject_label=second_step[0],
+                    relationship=second_step[1],
+                    object_label=second_step[2],
+                ),
+            ],
+            used_entities=[
+                {
+                    "label": item.label,
+                    "name": item.name,
+                }
+                for item in sorted(
+                    entities,
+                    key=lambda entity: (entity.label, entity.name),
+                )
+            ],
+            description=f"{'、'.join(anchor_names)}{result_description}",
+        )
+
     def _relationship_template(
         self,
         subject_label: str,
@@ -1156,6 +1322,17 @@ LIMIT {limit}
 
     def _plan_cypher(self, state: AgentState) -> Dict[str, Any]:
         linked_entities = state.get("linked_entities", [])
+        multi_hop_plan = self._build_multi_hop_plan(state)
+        if multi_hop_plan is not None:
+            return {
+                "multi_hop_plan": multi_hop_plan,
+                "aggregate_plan": None,
+                "attribute_plan": None,
+                "attribute_relation_fallback": False,
+                "cypher_plan": None,
+                "query_attempts": state.get("query_attempts", 0),
+                "stage_events": ["plan_cypher"],
+            }
         attribute_plan = self._build_attribute_plan(state)
         if attribute_plan is not None:
             return {
@@ -1170,6 +1347,17 @@ LIMIT {limit}
         if aggregate_plan is not None:
             return {
                 "aggregate_plan": aggregate_plan,
+                "attribute_plan": None,
+                "attribute_relation_fallback": False,
+                "cypher_plan": None,
+                "query_attempts": state.get("query_attempts", 0),
+                "stage_events": ["plan_cypher"],
+            }
+        multi_condition_plan = self._build_multi_condition_list_plan(state)
+        if multi_condition_plan is not None:
+            return {
+                "aggregate_plan": None,
+                "multi_condition_plan": multi_condition_plan,
                 "attribute_plan": None,
                 "attribute_relation_fallback": False,
                 "cypher_plan": None,
@@ -1241,6 +1429,78 @@ LIMIT {limit}
             }
 
     def _validate_cypher(self, state: AgentState) -> Dict[str, Any]:
+        multi_hop_plan = state.get("multi_hop_plan")
+        if multi_hop_plan is not None:
+            try:
+                if len(multi_hop_plan.steps) != 2:
+                    raise ValueError("多跳步骤数量错误")
+                first, second = multi_hop_plan.steps
+                if first.object_label != second.subject_label:
+                    raise ValueError("多跳节点链不连续")
+                self.schema.assert_pattern(
+                    first.subject_label,
+                    first.relationship,
+                    first.object_label,
+                )
+                self.schema.assert_pattern(
+                    second.subject_label,
+                    second.relationship,
+                    second.object_label,
+                )
+                if any(
+                    entity.label != first.subject_label
+                    for entity in multi_hop_plan.used_entities
+                ):
+                    raise ValueError("多跳起始实体不匹配")
+            except Exception:
+                return {
+                    "multi_hop_plan": None,
+                    "is_cypher_valid": False,
+                    "validation_errors": [
+                        f"{ErrorCode.CYPHER_REJECTED.value}: "
+                        "多跳查询包含未允许的模式"
+                    ],
+                    "last_error_code": ErrorCode.CYPHER_REJECTED.value,
+                    "query_attempts": self.max_attempts,
+                    "stage_events": ["validate_cypher"],
+                }
+            return {
+                "is_cypher_valid": True,
+                "stage_events": ["validate_cypher"],
+            }
+
+        multi_condition_plan = state.get("multi_condition_plan")
+        if multi_condition_plan is not None:
+            try:
+                self.schema.assert_pattern(
+                    multi_condition_plan.subject_label,
+                    multi_condition_plan.relationship,
+                    multi_condition_plan.object_label,
+                )
+                if any(
+                    entity.label != multi_condition_plan.object_label
+                    for entity in multi_condition_plan.used_entities
+                ):
+                    raise ValueError("多条件实体标签不匹配")
+                if len(multi_condition_plan.used_entities) < 2:
+                    raise ValueError("多条件实体数量不足")
+            except Exception:
+                return {
+                    "multi_condition_plan": None,
+                    "is_cypher_valid": False,
+                    "validation_errors": [
+                        f"{ErrorCode.CYPHER_REJECTED.value}: "
+                        "多条件查询包含未允许的模式"
+                    ],
+                    "last_error_code": ErrorCode.CYPHER_REJECTED.value,
+                    "query_attempts": self.max_attempts,
+                    "stage_events": ["validate_cypher"],
+                }
+            return {
+                "is_cypher_valid": True,
+                "stage_events": ["validate_cypher"],
+            }
+
         aggregate_plan = state.get("aggregate_plan")
         if aggregate_plan is not None:
             try:
@@ -1346,6 +1606,186 @@ LIMIT {limit}
         }
 
     def _execute_cypher(self, state: AgentState) -> Dict[str, Any]:
+        multi_hop_plan = state.get("multi_hop_plan")
+        if multi_hop_plan is not None:
+            try:
+                result = self.repository.execute_multi_hop(multi_hop_plan)
+            except RepositoryError as exc:
+                return self._terminal_error(
+                    state,
+                    exc.code,
+                    exc.message,
+                    "图谱查询失败，请稍后重试。",
+                    "execute_cypher",
+                )
+            except Exception:
+                return self._terminal_error(
+                    state,
+                    ErrorCode.QUERY_EXECUTION_FAILED,
+                    "多跳查询发生内部错误",
+                    "图谱查询失败，请稍后重试。",
+                    "execute_cypher",
+                )
+            first, second = multi_hop_plan.steps
+            paths: List[PathEvidence] = []
+            seen_paths = set()
+            for row in result.rows:
+                root = row.get("root")
+                root_label = row.get("root_label")
+                intermediate = row.get("intermediate")
+                intermediate_label = row.get("intermediate_label")
+                target = row.get("target")
+                target_label = row.get("target_label")
+                first_relationship = row.get("first_relationship")
+                second_relationship = row.get("second_relationship")
+                if (
+                    not isinstance(root, str)
+                    or not isinstance(intermediate, str)
+                    or not isinstance(target, str)
+                    or root_label != first.subject_label
+                    or intermediate_label != first.object_label
+                    or target_label != second.object_label
+                    or first_relationship != first.relationship
+                    or second_relationship != second.relationship
+                ):
+                    continue
+                sources = row.get("sources")
+                source = None
+                if isinstance(sources, list):
+                    source = "；".join(
+                        item
+                        for item in sources
+                        if isinstance(item, str) and item
+                    ) or None
+                key = (
+                    root,
+                    intermediate,
+                    target,
+                    first_relationship,
+                    second_relationship,
+                    source,
+                )
+                if key in seen_paths:
+                    continue
+                seen_paths.add(key)
+                paths.append(
+                    PathEvidence(
+                        root=root,
+                        root_label=root_label,
+                        first_relationship=first_relationship,
+                        intermediate=intermediate,
+                        intermediate_label=intermediate_label,
+                        second_relationship=second_relationship,
+                        target=target,
+                        target_label=target_label,
+                        source=source,
+                    )
+                )
+            update: Dict[str, Any] = {
+                "query_result": result,
+                "evidence": [],
+                "facts": [],
+                "aggregates": [],
+                "paths": paths,
+                "stage_events": ["execute_cypher"],
+            }
+            if result.rows and not paths:
+                update.update(
+                    {
+                        "error_code": ErrorCode.NO_GRAPH_EVIDENCE.value,
+                        "error_message": "多跳查询没有返回可验证路径",
+                        "answer": NO_EVIDENCE_ANSWER,
+                        "grounded": False,
+                    }
+                )
+            return update
+
+        multi_condition_plan = state.get("multi_condition_plan")
+        if multi_condition_plan is not None:
+            try:
+                result = self.repository.execute_multi_condition_list(
+                    multi_condition_plan
+                )
+            except RepositoryError as exc:
+                return self._terminal_error(
+                    state,
+                    exc.code,
+                    exc.message,
+                    "图谱查询失败，请稍后重试。",
+                    "execute_cypher",
+                )
+            except Exception:
+                return self._terminal_error(
+                    state,
+                    ErrorCode.QUERY_EXECUTION_FAILED,
+                    "多条件查询发生内部错误",
+                    "图谱查询失败，请稍后重试。",
+                    "execute_cypher",
+                )
+            expected_names = {
+                entity.name
+                for entity in multi_condition_plan.used_entities
+            }
+            evidence_rows = []
+            for row in result.rows:
+                subject = row.get("subject")
+                subject_label = row.get("subject_label")
+                conditions = row.get("conditions")
+                if (
+                    not isinstance(subject, str)
+                    or not isinstance(subject_label, str)
+                    or not isinstance(conditions, list)
+                ):
+                    continue
+                for condition in conditions:
+                    if not isinstance(condition, Mapping):
+                        continue
+                    object_name = condition.get("object")
+                    object_label = condition.get("object_label")
+                    relationship = condition.get("relationship")
+                    if (
+                        object_name not in expected_names
+                        or object_label != multi_condition_plan.object_label
+                        or relationship != multi_condition_plan.relationship
+                    ):
+                        continue
+                    sources = condition.get("sources")
+                    source = None
+                    if isinstance(sources, list):
+                        source = "；".join(
+                            item
+                            for item in sources
+                            if isinstance(item, str) and item
+                        ) or None
+                    evidence_rows.append(
+                        {
+                            "subject": subject,
+                            "subject_label": subject_label,
+                            "relationship": relationship,
+                            "object": object_name,
+                            "object_label": object_label,
+                            "source": source,
+                        }
+                    )
+            evidence = evidence_from_rows(evidence_rows, self.schema)
+            update: Dict[str, Any] = {
+                "query_result": result,
+                "evidence": evidence,
+                "facts": [],
+                "aggregates": [],
+                "stage_events": ["execute_cypher"],
+            }
+            if result.rows and not evidence:
+                update.update(
+                    {
+                        "error_code": ErrorCode.NO_GRAPH_EVIDENCE.value,
+                        "error_message": "多条件查询没有返回可验证证据",
+                        "answer": NO_EVIDENCE_ANSWER,
+                        "grounded": False,
+                    }
+                )
+            return update
+
         aggregate_plan = state.get("aggregate_plan")
         if aggregate_plan is not None:
             try:
@@ -1512,10 +1952,13 @@ LIMIT {limit}
         evidence = state.get("evidence", [])
         facts = state.get("facts", [])
         aggregates = state.get("aggregates", [])
+        paths = state.get("paths", [])
         query_result = state.get("query_result")
         plan = state.get("cypher_plan")
         attribute_plan = state.get("attribute_plan")
         aggregate_plan = state.get("aggregate_plan")
+        multi_condition_plan = state.get("multi_condition_plan")
+        multi_hop_plan = state.get("multi_hop_plan")
         relation_context_valid = bool(
             evidence
             and plan is not None
@@ -1536,10 +1979,24 @@ LIMIT {limit}
             aggregates
             and aggregate_plan is not None
         )
+        multi_condition_context_valid = bool(
+            evidence
+            and multi_condition_plan is not None
+            and evidence_matches_used_entities(
+                evidence,
+                multi_condition_plan.used_entities,
+            )
+        )
+        multi_hop_context_valid = bool(
+            paths
+            and multi_hop_plan is not None
+        )
         if query_result is None or not (
             relation_context_valid
             or attribute_context_valid
             or aggregate_context_valid
+            or multi_condition_context_valid
+            or multi_hop_context_valid
         ):
             return self._terminal_error(
                 state,
@@ -1548,6 +2005,31 @@ LIMIT {limit}
                 NO_EVIDENCE_ANSWER,
                 "answer_from_graph",
             )
+        if multi_hop_plan is not None and paths:
+            answer = append_disclaimer(
+                _multi_hop_answer(multi_hop_plan, paths)
+            )
+            _emit_answer_delta(answer)
+            return {
+                "answer": answer,
+                "grounded": True,
+                "stage_events": ["answer_from_graph"],
+            }
+        if multi_condition_plan is not None and evidence:
+            result_names = list(
+                dict.fromkeys(item.subject for item in evidence)
+            )
+            lines = [
+                f"根据当前图谱，{multi_condition_plan.description}如下：",
+                *[f"- {name}" for name in result_names],
+            ]
+            answer = append_disclaimer("\n".join(lines))
+            _emit_answer_delta(answer)
+            return {
+                "answer": answer,
+                "grounded": True,
+                "stage_events": ["answer_from_graph"],
+            }
         if aggregates and not evidence:
             answer = append_disclaimer(_aggregate_answer(aggregates))
             _emit_answer_delta(answer)
@@ -1573,20 +2055,19 @@ LIMIT {limit}
                 parts.append(token)
                 _emit_answer_delta(token)
 
-        stream_answer = getattr(self.reasoner, "stream_answer_from_graph", None)
         try:
-            if callable(stream_answer):
-                streamed = stream_answer(
-                    _active_question(state),
-                    state.get("linked_entities", []),
-                    query_result.rows,
-                    evidence,
-                    facts,
-                    on_token,
-                )
+            streamed = self.agents.answer.stream_graph_answer(
+                _active_question(state),
+                state.get("linked_entities", []),
+                query_result.rows,
+                evidence,
+                facts,
+                on_token,
+            )
+            if streamed is not None:
                 answer = "".join(parts) or streamed
             else:
-                answer = self.reasoner.answer_from_graph(
+                answer = self.agents.answer.graph_answer(
                     _active_question(state),
                     state.get("linked_entities", []),
                     query_result.rows,
@@ -1639,6 +2120,7 @@ LIMIT {limit}
             evidence,
             facts,
             state.get("aggregates", []),
+            state.get("paths", []),
         ):
             fallback = append_disclaimer(
                 _aggregate_answer(state.get("aggregates", []))
@@ -1668,13 +2150,17 @@ LIMIT {limit}
                 parts.append(token)
                 _emit_answer_delta(token)
 
-        stream_answer = getattr(self.reasoner, "stream_direct_answer", None)
         try:
-            if callable(stream_answer):
-                streamed = stream_answer(_active_question(state), on_token)
+            streamed = self.agents.answer.stream_direct_answer(
+                _active_question(state),
+                on_token,
+            )
+            if streamed is not None:
                 answer = "".join(parts) or streamed
             else:
-                answer = self.reasoner.direct_answer(_active_question(state))
+                answer = self.agents.answer.direct_answer(
+                    _active_question(state)
+                )
                 _emit_answer_delta(answer)
             return {
                 "answer": answer.strip(),
@@ -1793,6 +2279,7 @@ LIMIT {limit}
             state.get("aggregates")
             or state.get("facts")
             or state.get("evidence")
+            or state.get("paths")
         ):
             return "answer_from_graph"
         result = state.get("query_result")
@@ -1826,10 +2313,13 @@ LIMIT {limit}
             "attribute_query_attempted": False,
             "attribute_relation_fallback": False,
             "aggregate_plan": None,
+            "multi_condition_plan": None,
+            "multi_hop_plan": None,
             "cypher_plan": None,
             "query_result": None,
             "facts": [],
             "aggregates": [],
+            "paths": [],
             "error_code": None,
             "error_message": None,
             "last_error_code": None,
@@ -1892,6 +2382,7 @@ LIMIT {limit}
             evidence=final_state.get("evidence", []),
             facts=final_state.get("facts", []),
             aggregates=final_state.get("aggregates", []),
+            paths=final_state.get("paths", []),
             warnings=final_state.get("warnings", []),
             error=err,
             session_id=session_id,
@@ -1952,6 +2443,7 @@ LIMIT {limit}
             ):
                 if mode == "updates":
                     for node_name, update in payload.items():
+                        agent = self.agents.agent_for_stage(node_name)
                         yield GraphQAStreamEvent(
                             event="stage",
                             data={
@@ -1960,6 +2452,7 @@ LIMIT {limit}
                                     node_name,
                                     node_name,
                                 ),
+                                "agent": agent.name,
                             },
                         )
                         evidence = update.get("evidence", [])
@@ -1992,6 +2485,17 @@ LIMIT {limit}
                                     "items": [
                                         item.model_dump(mode="json")
                                         for item in aggregates
+                                    ]
+                                },
+                            )
+                        paths = update.get("paths", [])
+                        if paths:
+                            yield GraphQAStreamEvent(
+                                event="paths",
+                                data={
+                                    "items": [
+                                        item.model_dump(mode="json")
+                                        for item in paths
                                     ]
                                 },
                             )

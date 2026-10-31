@@ -14,6 +14,8 @@ from graph_qa.models import (
     AttributeQueryPlan,
     CypherPlan,
     ErrorCode,
+    MultiConditionQueryPlan,
+    MultiHopQueryPlan,
     QueryResult,
 )
 from graph_qa.schema import GraphSchema, SUPPORTED_ENTITY_LABELS
@@ -417,4 +419,219 @@ class Neo4jRepository:
             row_count=len(rows),
             elapsed_ms=int((time.perf_counter() - started_at) * 1000),
             limit_applied=1,
+        )
+
+    def execute_multi_condition_list(
+        self,
+        plan: MultiConditionQueryPlan,
+    ) -> QueryResult:
+        """返回同时满足多个一跳条件的结果及对应关系证据。"""
+        try:
+            self.schema.assert_pattern(
+                plan.subject_label,
+                plan.relationship,
+                plan.object_label,
+            )
+        except Exception as exc:
+            raise RepositoryError(
+                ErrorCode.CYPHER_REJECTED,
+                "多条件查询不符合图谱 Schema",
+            ) from exc
+        if any(
+            entity.label != plan.object_label
+            for entity in plan.used_entities
+        ):
+            raise RepositoryError(
+                ErrorCode.CYPHER_REJECTED,
+                "多条件查询实体标签不匹配",
+            )
+        entity_names = sorted(
+            {entity.name for entity in plan.used_entities}
+        )
+        if len(entity_names) < 2:
+            raise RepositoryError(
+                ErrorCode.CYPHER_REJECTED,
+                "多条件查询至少需要两个实体",
+            )
+
+        exists_clauses = []
+        parameters = {}
+        for index, entity_name in enumerate(entity_names):
+            parameter_name = f"entity_{index}"
+            parameters[parameter_name] = entity_name
+            exists_clauses.append(
+                "EXISTS { "
+                f"MATCH (subject)-[:{plan.relationship}]->"
+                f"(required:{plan.object_label}) "
+                f"WHERE required.name = ${parameter_name} "
+                "}"
+            )
+        query = f"""
+MATCH (subject:{plan.subject_label})
+WHERE {' AND '.join(exists_clauses)}
+WITH DISTINCT subject
+MATCH (subject)-[relationship:{plan.relationship}]->(object:{plan.object_label})
+WHERE object.name IN $entity_names
+OPTIONAL MATCH (subject)-[:FROM_SOURCE]->(source_node:Source)
+WITH subject, relationship, object,
+     collect(DISTINCT source_node.name) AS source_names
+WITH subject,
+     collect(DISTINCT {{
+         relationship: type(relationship),
+         object: object.name,
+         object_label: labels(object)[0],
+         sources: [name IN source_names WHERE name IS NOT NULL]
+     }}) AS conditions
+RETURN subject.name AS subject,
+       labels(subject)[0] AS subject_label,
+       conditions
+ORDER BY subject
+LIMIT {self.max_results}
+""".strip()
+        parameters["entity_names"] = entity_names
+        started_at = time.perf_counter()
+        try:
+            rows = self._run_transaction(
+                query,
+                parameters,
+                fetch_limit=self.max_results,
+            )
+        except Exception as exc:
+            text = str(exc).lower()
+            code = (
+                ErrorCode.QUERY_TIMEOUT
+                if "timeout" in text or "timed out" in text
+                else ErrorCode.QUERY_EXECUTION_FAILED
+            )
+            message = (
+                "图谱查询超时"
+                if code == ErrorCode.QUERY_TIMEOUT
+                else "图谱查询执行失败"
+            )
+            raise RepositoryError(code, message) from exc
+        return QueryResult(
+            cypher=query,
+            parameters=parameters,
+            rows=rows,
+            row_count=len(rows),
+            elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+            limit_applied=self.max_results,
+        )
+
+    def execute_multi_hop(
+        self,
+        plan: MultiHopQueryPlan,
+    ) -> QueryResult:
+        """执行受控的两跳查询并返回完整路径记录。"""
+        if len(plan.steps) != 2:
+            raise RepositoryError(
+                ErrorCode.CYPHER_REJECTED,
+                "多跳查询必须包含两个步骤",
+            )
+        first, second = plan.steps
+        if first.object_label != second.subject_label:
+            raise RepositoryError(
+                ErrorCode.CYPHER_REJECTED,
+                "多跳查询节点链不连续",
+            )
+        try:
+            self.schema.assert_pattern(
+                first.subject_label,
+                first.relationship,
+                first.object_label,
+            )
+            self.schema.assert_pattern(
+                second.subject_label,
+                second.relationship,
+                second.object_label,
+            )
+        except Exception as exc:
+            raise RepositoryError(
+                ErrorCode.CYPHER_REJECTED,
+                "多跳查询不符合图谱 Schema",
+            ) from exc
+        if any(
+            entity.label != first.subject_label
+            for entity in plan.used_entities
+        ):
+            raise RepositoryError(
+                ErrorCode.CYPHER_REJECTED,
+                "多跳查询起始实体标签不匹配",
+            )
+
+        can_load_source = (
+            first.subject_label,
+            "FROM_SOURCE",
+            "Source",
+        ) in self.schema.triple_patterns
+        source_match = (
+            "\nOPTIONAL MATCH "
+            "(root)-[:FROM_SOURCE]->(source_node:Source)"
+            if can_load_source
+            else ""
+        )
+        source_return = (
+            "[name IN source_names WHERE name IS NOT NULL]"
+            if can_load_source
+            else "[]"
+        )
+        with_clause = (
+            "WITH root, first, middle, second, target, "
+            "collect(DISTINCT source_node.name) AS source_names"
+            if can_load_source
+            else "WITH root, first, middle, second, target"
+        )
+        query = f"""
+MATCH (root:{first.subject_label})
+      -[first:{first.relationship}]->
+      (middle:{first.object_label})
+      -[second:{second.relationship}]->
+      (target:{second.object_label})
+WHERE root.name IN $entity_names
+{source_match}
+{with_clause}
+RETURN DISTINCT root.name AS root,
+       labels(root)[0] AS root_label,
+       type(first) AS first_relationship,
+       middle.name AS intermediate,
+       labels(middle)[0] AS intermediate_label,
+       type(second) AS second_relationship,
+       target.name AS target,
+       labels(target)[0] AS target_label,
+       {source_return} AS sources
+ORDER BY root, intermediate, target
+LIMIT {self.max_results}
+""".strip()
+        parameters = {
+            "entity_names": sorted(
+                {entity.name for entity in plan.used_entities}
+            )
+        }
+        started_at = time.perf_counter()
+        try:
+            rows = self._run_transaction(
+                query,
+                parameters,
+                fetch_limit=self.max_results,
+            )
+        except Exception as exc:
+            text = str(exc).lower()
+            code = (
+                ErrorCode.QUERY_TIMEOUT
+                if "timeout" in text or "timed out" in text
+                else ErrorCode.QUERY_EXECUTION_FAILED
+            )
+            message = (
+                "图谱查询超时"
+                if code == ErrorCode.QUERY_TIMEOUT
+                else "图谱查询执行失败"
+            )
+            raise RepositoryError(code, message) from exc
+        return QueryResult(
+            cypher=query,
+            parameters=parameters,
+            rows=rows,
+            row_count=len(rows),
+            elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+            limit_applied=self.max_results,
         )

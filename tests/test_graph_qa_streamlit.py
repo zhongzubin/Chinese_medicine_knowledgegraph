@@ -62,3 +62,23 @@ def test_parse_sse_lines_accepts_aggregate_event():
 
     assert events[0][0] == "aggregates"
     assert events[0][1]["items"][0]["count"] == 128
+
+
+def test_parse_sse_lines_accepts_multi_hop_path_event():
+    events = list(
+        parse_sse_lines(
+            iter(
+                [
+                    "event: paths",
+                    (
+                        'data: {"items":[{"root":"四君子汤",'
+                        '"intermediate":"人参","target":"补气"}]}'
+                    ),
+                    "",
+                ]
+            )
+        )
+    )
+
+    assert events[0][0] == "paths"
+    assert events[0][1]["items"][0]["intermediate"] == "人参"

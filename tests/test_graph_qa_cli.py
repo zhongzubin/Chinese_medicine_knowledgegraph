@@ -12,6 +12,7 @@ from graph_qa.models import (
     ErrorCode,
     Evidence,
     GraphQAResponse,
+    PathEvidence,
     QueryInfo,
 )
 
@@ -119,6 +120,32 @@ def test_render_text_includes_aggregate_result():
 
     assert "图谱统计" in output
     assert "关联到人参的方剂：7" in output
+
+
+def test_render_text_includes_multi_hop_path():
+    response = GraphQAResponse(
+        question="四君子汤所含药材有什么功效？",
+        answer="四君子汤所含人参具有补气功效。",
+        grounded=True,
+        paths=[
+            PathEvidence(
+                root="四君子汤",
+                root_label="Formula",
+                first_relationship="HAS_INGREDIENT",
+                intermediate="人参",
+                intermediate_label="Herb",
+                second_relationship="HAS_EFFECT",
+                target="补气",
+                target_label="Effect",
+            )
+        ],
+    )
+
+    output = render_text(response)
+
+    assert "多跳路径" in output
+    assert "HAS_INGREDIENT" in output
+    assert "HAS_EFFECT" in output
 
 
 def test_run_json_output_and_closes_repository():
