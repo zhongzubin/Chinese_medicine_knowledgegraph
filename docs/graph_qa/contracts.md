@@ -1,9 +1,9 @@
 # 知识图谱问答数据与接口契约
 
-> 文档状态：当前实现基线 v1.0
+> 文档状态：当前实现基线 v1.1
 >
-> 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit
-> 最后更新：2026-10-28
+> 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit、查询扩展与 Agent 基础层
+> 最后更新：2026-10-31
 
 本文定义 CLI、内部模块、FastAPI、Redis 会话、SSE 和 Streamlit 客户端必须遵守的当前契约。
 
@@ -120,6 +120,7 @@ CLI 不读取交互式标准输入。Streamlit 通过 FastAPI 服务接口接入
   ],
   "facts": [],
   "aggregates": [],
+  "paths": [],
   "warnings": [],
   "error": null
 }
@@ -140,6 +141,7 @@ CLI 不读取交互式标准输入。Streamlit 通过 FastAPI 服务接口接入
   "evidence": [],
   "facts": [],
   "aggregates": [],
+  "paths": [],
   "warnings": [],
   "error": {
     "code": "CYPHER_REJECTED",
@@ -289,6 +291,57 @@ AggregateFact
 
 聚合查询只允许已存在的 Schema 三元组模式和单跳 `count(DISTINCT ...)`。`require_all_entities=true` 时，每个已链接实体都必须满足同一条 Schema 关系，用于交集计数。`GraphQAResponse.aggregates` 默认空数组，不把计数伪装成节点属性或关系证据。
 
+### 4.9 多条件结果列表
+
+“同时含有人参和白术的方剂有哪些”等非计数问题使用独立受控计划：
+
+```text
+MultiConditionQueryPlan
+- subject_label: str
+- relationship: str
+- object_label: str
+- used_entities: list[UsedEntityRef], 至少 2 个
+- description: str
+```
+
+执行时每个必需实体都必须通过固定的 `EXISTS` 条件，结果取多个条件的交集。返回记录仍转换为 `Evidence`，以展示结果实体与每个命中条件的关系和来源。该模式不调用模型自由排序、补写结果或生成任意聚合。
+
+### 4.10 受控多跳路径
+
+两跳查询使用显式、Schema 白名单内的路径计划：
+
+```text
+MultiHopStep
+- subject_label: str
+- relationship: str
+- object_label: str
+
+MultiHopQueryPlan
+- steps: list[MultiHopStep], 当前固定为 2 步
+- used_entities: list[UsedEntityRef]
+- description: str
+
+PathEvidence
+- root: str
+- root_label: str
+- first_relationship: str
+- intermediate: str
+- intermediate_label: str
+- second_relationship: str
+- target: str
+- target_label: str
+- source: str | null
+```
+
+当前只允许以下两跳模式：
+
+1. `Formula -HAS_INGREDIENT-> Herb -HAS_EFFECT-> Effect`
+2. `Formula -HAS_INGREDIENT-> Herb -TREATS_DISEASE-> Disease`
+3. `Formula -HAS_INGREDIENT-> Herb -ALLEVIATES_SYMPTOM-> Symptom`
+4. `Herb -TREATS_DISEASE-> Disease -HAS_SYMPTOM-> Symptom`
+
+两步节点链必须连续，每一步都必须通过 Schema 校验。`GraphQAResponse.paths` 默认空数组；任意深度、变量长度路径和模型自由规划不在当前契约内。
+
 ## 5. 大模型输出契约
 
 ### 5.1 意图分类
@@ -304,11 +357,13 @@ AggregateFact
 
 查询规划优先级固定为：
 
-1. 属性问题优先使用白名单属性模板，不调用模型生成属性查询。
-2. 明确的“多少、几个、几种”问题在 Schema 方向和问题指向唯一时使用受控计数模板。
-3. 高频关系问题在 Schema 方向和问题指向唯一时使用固定关系模板，支持正向和反向查询。
-4. 模板无法唯一覆盖时，才调用模型生成受 Schema 约束的 Text2Cypher。
-5. 所有关系模板和 Text2Cypher 结果都必须经过同一个只读校验器。
+1. 同时要求两个受控关系且匹配唯一白名单路径时，使用两跳模板。
+2. 属性问题使用白名单属性模板，不调用模型生成属性查询。
+3. 明确的“多少、几个、几种”问题在 Schema 方向和问题指向唯一时使用受控计数模板。
+4. 非计数且同时要求多个实体时，使用多条件交集结果列表模板。
+5. 高频关系问题在 Schema 方向和问题指向唯一时使用固定关系模板，支持正向和反向查询。
+6. 受控模板无法覆盖时，才调用模型生成受 Schema 约束的 Text2Cypher。
+7. 所有关系模板、多条件、多跳和 Text2Cypher 结果都必须经过对应结构校验。
 
 当属性字段为空且问题涉及“功效”或“主治”时，允许受控回退到对应关系查询；其他属性为空时直接返回无可验证依据。
 
@@ -353,10 +408,12 @@ AggregateFact
 
 ```text
 load_entity_index() -> EntityIndex
-explain(cypher, parameters) -> None | raises QueryValidationError
-execute_read(cypher, parameters, timeout, max_rows) -> QueryResult
+explain(plan) -> None | raises QueryValidationError
+execute_read(plan) -> QueryResult
 execute_attributes(attribute_plan) -> QueryResult
 execute_aggregate(aggregate_plan) -> QueryResult
+execute_multi_condition_list(multi_condition_plan) -> QueryResult
+execute_multi_hop(multi_hop_plan) -> QueryResult
 ```
 
 仓储责任：
@@ -366,6 +423,8 @@ execute_aggregate(aggregate_plan) -> QueryResult
 - 应用超时和结果上限。
 - 属性查询使用固定 Cypher 模板，不接受模型生成的任意属性查询。
 - 聚合查询使用固定单跳/交集计数模板，不允许聚合表达式或标签由模型任意生成。
+- 多条件列表使用固定 `EXISTS` 交集模板，不允许模型自由拼接条件或结果。
+- 多跳查询只接受两步、节点连续且每一步都通过 Schema 白名单的计划。
 - 将驱动返回对象转换为可序列化数据。
 - 不拼接用户输入，不生成 Cypher，不调用大模型。
 
@@ -418,10 +477,11 @@ HTTP 响应不得默认暴露原始提示词、模型隐藏推理和完整数据
 
 | 事件 | 数据 |
 | --- | --- |
-| `stage` | `stage`、中文 `label` |
+| `stage` | `stage`、中文 `label`、对应 `agent` |
 | `evidence` | `items` 数组 |
 | `facts` | `items` 数组，属性事实 |
 | `aggregates` | `items` 数组，受控计数结果 |
+| `paths` | `items` 数组，受控多跳路径 |
 | `answer_delta` | `delta` 文本 |
 | `warning` | `message` |
 | `error` | 稳定错误码与消息 |
@@ -456,6 +516,8 @@ M1 CLI 和评测继续使用无会话调用，不依赖 Redis 会话状态。
 ## 9. 兼容性要求
 
 - 结果对象增加字段允许向后兼容，删除或重命名字段需要升级 `schema_version`。
+- `GraphQAResponse.paths` 和 SSE `paths` 是向后兼容的新增字段。
+- SSE `stage.data.agent` 是向后兼容的新增字段，调用方不应依赖固定阶段数量。
 - 安全错误码不得改为“成功但无结果”。
 - 图元数据版本变化时，必须运行实体索引和黄金问题集回归。
 - 测试和日志中不得出现真实模型密钥、数据库密码或完整用户健康文本。
