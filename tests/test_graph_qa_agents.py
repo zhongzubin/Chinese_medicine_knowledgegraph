@@ -9,6 +9,7 @@ from graph_qa.agents import (
     EvidenceAuditAgent,
     QAAgentTeam,
     RetrievalAgent,
+    RetrievalLoopObservation,
 )
 from graph_qa.agents.retrieval import MULTI_HOP_CATALOG
 from graph_qa.entity_linker import EntityIndex, EntityRecord
@@ -42,6 +43,7 @@ EXPECTED_STAGE_AGENTS = {
     "plan_cypher": "retrieval",
     "validate_cypher": "retrieval",
     "execute_cypher": "retrieval",
+    "retrieve_observe": "retrieval",
     "answer_from_graph": "answer",
     "direct_answer": "answer",
     "verify_answer": "evidence_audit",
@@ -60,6 +62,7 @@ TRACE_STAGES = (
     "plan_cypher",
     "validate_cypher",
     "execute_cypher",
+    "retrieve_observe",
     "answer_from_graph",
     "verify_answer",
     "finish",
@@ -411,6 +414,112 @@ def test_retrieval_multi_hop_catalog_is_fixed_and_contiguous():
         first_step[2] == second_step[0]
         for first_step, second_step, _description in MULTI_HOP_CATALOG
     )
+
+
+@pytest.mark.parametrize(
+    ("observation", "next_action", "reason_code"),
+    [
+        (
+            RetrievalLoopObservation(
+                step=1,
+                max_steps=3,
+                plan_kind="schema_constrained_cypher",
+                is_valid=False,
+                error_code=None,
+                attribute_relation_fallback=False,
+                has_context=False,
+                row_count=0,
+            ),
+            "replan",
+            "VALIDATION_RETRY",
+        ),
+        (
+            RetrievalLoopObservation(
+                step=3,
+                max_steps=3,
+                plan_kind="schema_constrained_cypher",
+                is_valid=False,
+                error_code=None,
+                attribute_relation_fallback=False,
+                has_context=False,
+                row_count=0,
+            ),
+            "safe_fail",
+            "VALIDATION_RETRIES_EXHAUSTED",
+        ),
+        (
+            RetrievalLoopObservation(
+                step=1,
+                max_steps=3,
+                plan_kind="controlled_attribute",
+                is_valid=True,
+                error_code=None,
+                attribute_relation_fallback=True,
+                has_context=False,
+                row_count=1,
+            ),
+            "replan",
+            "ATTRIBUTE_EMPTY_RELATION_FALLBACK",
+        ),
+        (
+            RetrievalLoopObservation(
+                step=1,
+                max_steps=3,
+                plan_kind="controlled_relationship",
+                is_valid=True,
+                error_code=None,
+                attribute_relation_fallback=False,
+                has_context=True,
+                row_count=3,
+            ),
+            "answer_from_graph",
+            "VERIFIABLE_CONTEXT_AVAILABLE",
+        ),
+        (
+            RetrievalLoopObservation(
+                step=1,
+                max_steps=3,
+                plan_kind="controlled_relationship",
+                is_valid=True,
+                error_code=None,
+                attribute_relation_fallback=False,
+                has_context=False,
+                row_count=0,
+            ),
+            "no_evidence",
+            "QUERY_RETURNED_NO_ROWS",
+        ),
+        (
+            RetrievalLoopObservation(
+                step=1,
+                max_steps=3,
+                plan_kind="controlled_relationship",
+                is_valid=True,
+                error_code="NO_GRAPH_EVIDENCE",
+                attribute_relation_fallback=False,
+                has_context=False,
+                row_count=1,
+            ),
+            "finish",
+            "EXECUTION_ERROR",
+        ),
+    ],
+)
+def test_retrieval_agent_observes_tool_result_and_decides_next_action(
+    observation,
+    next_action,
+    reason_code,
+):
+    agent = RetrievalAgent(
+        reasoner=object(),
+        schema=make_schema(),
+        max_results=50,
+    )
+
+    decision = agent.observe(observation)
+
+    assert decision.next_action == next_action
+    assert decision.reason_code == reason_code
 
 
 def test_agent_registry_has_unique_names_and_stage_owners():

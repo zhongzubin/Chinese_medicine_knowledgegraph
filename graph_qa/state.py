@@ -2,7 +2,7 @@
 """LangGraph 问答工作流状态。"""
 
 import operator
-from typing import Annotated, List, Optional, TypedDict
+from typing import Annotated, Any, Dict, List, Optional, TypedDict
 
 from graph_qa.models import (
     AggregateFact,
@@ -45,6 +45,9 @@ class AgentState(TypedDict, total=False):
     multi_hop_plan: Optional[MultiHopQueryPlan]
     cypher_plan: Optional[CypherPlan]
     retrieval_plan_kind: Optional[RetrievalPlanKind]
+    retrieval_steps: int
+    retrieval_next_action: Optional[str]
+    retrieval_trace: Annotated[List[Dict[str, Any]], operator.add]
     query_attempts: int
     validation_errors: Annotated[List[str], operator.add]
     last_error_code: Optional[str]

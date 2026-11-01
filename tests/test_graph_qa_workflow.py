@@ -994,6 +994,14 @@ def test_stream_answer_emits_public_stages_progress_and_answer_deltas():
             and event.data.get("stage") == "plan_cypher"
         )
     ]
+    observe_stages = [
+        event.data
+        for event in events
+        if (
+            event.event == "stage"
+            and event.data.get("stage") == "retrieve_observe"
+        )
+    ]
 
     assert {
         "normalize",
@@ -1021,6 +1029,17 @@ def test_stream_answer_emits_public_stages_progress_and_answer_deltas():
         "cypher" not in item and "parameters" not in item
         for item in plan_stages
     )
+    assert [
+        item["decision"]
+        for item in observe_stages
+    ] == ["replan", "answer_from_graph"]
+    assert [
+        item["reason_code"]
+        for item in observe_stages
+    ] == [
+        "ATTRIBUTE_EMPTY_RELATION_FALLBACK",
+        "VERIFIABLE_CONTEXT_AVAILABLE",
+    ]
 
 
 def test_unsupported_answer_is_replaced_by_evidence_fallback():

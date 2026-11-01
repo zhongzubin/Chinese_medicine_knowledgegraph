@@ -120,6 +120,15 @@ def test_stage_display_label_only_adds_safe_retrieval_plan_type():
             "plan_label": "不应显示",
         }
     )
+    observe_label = _stage_display_label(
+        {
+            "stage": "retrieve_observe",
+            "label": "观察检索结果并决定下一步",
+            "decision": "replan",
+            "reason_code": "VALIDATION_RETRY",
+        }
+    )
 
     assert plan_label == "生成图谱查询（受控两跳）"
     assert generic_label == "校验查询安全"
+    assert observe_label == "观察检索结果并决定下一步（重新规划）"

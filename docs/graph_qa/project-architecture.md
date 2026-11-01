@@ -1,6 +1,6 @@
 # 项目架构图
 
-> 当前实现基线：`718b77a`
+> 当前阶段：受控单 Agent 闭环 MVP
 >
 > 图示范围：本地单 worker、固定 LangGraph 拓扑、只读 Neo4j 查询
 
@@ -22,11 +22,11 @@ flowchart TB
         Redis[("Redis\n5 轮会话 · TTL · 会话锁")]
     end
 
-    subgraph Workflow["固定 LangGraph 工作流 · 16 节点"]
+    subgraph Workflow["固定 LangGraph 工作流 · 17 节点"]
         Dialogue["dialogue\n规范化与历史改写"]
         Intent["intent\n实体预匹配与领域意图"]
         Entity["entity\n候选抽取与实体链接"]
-        Retrieval["retrieval\n真实受控检索规划 Agent"]
+        Retrieval["retrieval\n受控循环 Agent\nplan → act → observe → replan"]
         Answer["answer\n证据回答或直接回答"]
         Audit["evidence_audit\n确定性证据覆盖校验"]
     end
@@ -52,6 +52,7 @@ flowchart TB
     Security <--> Redis
     Security --> Dialogue
     Dialogue --> Intent --> Entity --> Retrieval --> Answer --> Audit
+    Retrieval -.观察结果后重新规划.-> Retrieval
     Intent -.非中医.-> Answer
     Entity <--> Vector
     Dialogue <--> Model
@@ -71,11 +72,11 @@ flowchart TB
 | `dialogue` | 模型调用角色封装，负责上下文改写并支持历史降级 | 否 |
 | `intent` | 确定性实体预匹配 + 模型领域意图分类 | 否 |
 | `entity` | 模型候选抽取 + 确定性 exact/fuzzy/FAISS 链接 | 否 |
-| `retrieval` | 真实确定性规划 Agent，有独立输入输出契约 | 否 |
+| `retrieval` | 真实受控闭环 Agent，有独立契约并执行规划、观察和预算内重规划 | 否 |
 | `answer` | 模型回答角色封装，失败时使用证据化回答 | 否 |
 | `evidence_audit` | 真实确定性 Agent，逐项证据覆盖并回退 | 否 |
 
-当前所有 Agent 都运行在固定 LangGraph 主拓扑中。`retrieval` 和 `evidence_audit` 已经是实际可测试 Agent，但还没有为每个 Agent 编译独立子图，也没有动态 Agent 调度。
+当前所有 Agent 都运行在固定 LangGraph 主拓扑中。`retrieval` 已具备 `plan → act → observe → replan` 闭环，`retrieval` 和 `evidence_audit` 都是实际可测试 Agent；但还没有为每个 Agent 编译独立子图，也没有动态 Agent 调度。
 
 ## 3. 检索规划顺序
 

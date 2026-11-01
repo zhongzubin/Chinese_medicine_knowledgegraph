@@ -28,7 +28,7 @@
 | 本地演示版 | 已完成；一键启动/停止和真实浏览器验收通过 |
 | 专业问答质量 v1 | 首轮已完成；属性、确定性查询、多轮和答案支持校验通过 |
 | 查询覆盖扩展 | 已完成首轮；多条件结果列表和四种 Schema 白名单两跳 |
-| Agent 基础层 | 已启动；角色注册、固定阶段映射、检索规划 Agent 和证据审核 Agent 已接入 |
+| Agent 基础层 | 已启动；角色注册、受控检索 Agent 闭环和证据审核 Agent 已接入 |
 | M5 微调/部署增强 | 未开始 |
 
 明确不在当前范围：
@@ -40,7 +40,7 @@
 
 ## 3. 已实现架构
 
-LangGraph 当前包含 16 个节点，主要流程：
+LangGraph 当前包含 17 个节点，主要流程：
 
 ```text
 规范化
@@ -54,18 +54,19 @@ LangGraph 当前包含 16 个节点，主要流程：
      / 唯一方向关系模板 / Schema 约束 Cypher
   -> 结构校验 / Guard / EXPLAIN
   -> Neo4j 只读查询
+  -> Agent 观察结果并决定重规划 / 回答 / 无依据 / 安全终止
   -> 属性事实 + 聚合结果 + 关系证据 + 多跳路径
   -> 流式答案 + 证据支持校验
 ```
 
 实体匹配顺序不能随意改成“语义优先”。真实测试中，“麻黄草”的 fuzzy 能正确命中麻黄，而 BGE 语义 Top-1 曾误排为天麻；当前策略是词形高置信匹配置信度高于语义召回。
 
-Agent 基础层目前是固定 LangGraph 拓扑上的职责注册，不是独立 Agent 子图：
+Agent 基础层目前是固定 LangGraph 拓扑上的职责注册，已具备受控单 Agent 闭环，但还不是独立 Agent 子图：
 
 - `dialogue`：规范化与多轮改写，改写模型通过角色对象调用。
 - `intent`：实体预匹配与领域意图，意图模型通过角色对象调用。
 - `entity`：候选抽取与实体链接，抽取模型通过角色对象调用，最终链接仍为确定性实现。
-- `retrieval`：真实确定性检索规划 Agent；守护查询选择和安全回退，执行仍由工作流下游完成。
+- `retrieval`：真实受控闭环 Agent；选择计划、观察校验/执行结果，并决定重规划、回答、无依据或安全终止。
 - `answer`：图谱回答与直接回答，模型调用通过角色对象完成。
 - `evidence_audit`：真实确定性 Agent，逐项核对回答覆盖、统计缺失来源并在必要时回退为证据化回答。
 
@@ -131,7 +132,7 @@ models/bge-large-zh-v1.5
 
 | 文件 | 作用 |
 | --- | --- |
-| `graph_qa/workflow.py` | 16 节点 LangGraph 工作流、改写、SSE 事件 |
+| `graph_qa/workflow.py` | 17 节点 LangGraph 工作流、受控 Agent 循环、改写与 SSE 事件 |
 | `graph_qa/agents/` | Agent 描述、注册表和模型调用角色 |
 | `graph_qa/agents/evidence_audit.py` | 逐项证据覆盖、来源计数和回退回答 |
 | `graph_qa/entity_linker.py` | 精确、fuzzy 和语义召回融合 |
@@ -177,7 +178,7 @@ uv run streamlit run graph_qa/streamlit_app.py
 
 ## 9. 验证基线
 
-- 当前全量 pytest：`221 passed, 5 skipped`。
+- 当前全量 pytest：`227 passed, 5 skipped`。
 - 真实 Neo4j + 模型集成：本地演示和历史验收已通过；本轮默认 pytest 中按配置跳过。
 - Redis 限流、并发、会话集成：历史验收已通过；本轮默认 pytest 中按配置跳过。
 - 真实跨实例 SSE 会话：历史验收已通过；本轮未重跑。
@@ -221,7 +222,7 @@ uv run python -m pytest tests/ -v
 - 没有可靠的 API 请求级硬取消，仍依赖模型和 Neo4j 组件超时。
 - 没有面向最终用户的多用户认证、监控和正式部署收尾。
 - 不实现内容生成第三路由。
-- `retrieval` 与 `evidence_audit` 已成为真实 Agent；独立 Agent 拓扑和动态调度仍未完成。
+- `retrieval` 已具备主图内的 `plan → act → observe → replan` 闭环；独立 Agent 子图和动态调度仍未完成。
 - 澄清后未解析代词已阻止进入 semantic 链接；最终 62 轮全量通过。
 
 ## 11. 当前实现与验证状态
@@ -236,7 +237,7 @@ uv run python -m pytest tests/ -v
 - 证据审核 Agent 与回答校验提交：`b0dc5d2`。
 - 检索规划 Agent 提交：`80ddc7b`。
 - 未知实体、无依据与 200 条产品集提交：`dd55231`。
-- 全量 pytest：`221 passed, 5 skipped`。
+- 全量 pytest：`227 passed, 5 skipped`。
 - 产品固定集：200/200 outcome 通过；未知实体误召回 0%，无依据与无来源披露 100%。
 - 真实 120 条 outcome：`119/120`；实体 Recall@3：97.78%；grounded 证据覆盖率：100%。
 - 多轮最终全量：20 组、62 轮，outcome 和实体匹配均为 100%。

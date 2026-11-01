@@ -47,6 +47,19 @@ def _stage_display_label(event_data: dict) -> Optional[str]:
         and plan_label
     ):
         return f"{stage_label}（{plan_label}）"
+    if event_data.get("stage") == "retrieve_observe" and stage_label:
+        decision_labels = {
+            "replan": "重新规划",
+            "answer_from_graph": "进入证据回答",
+            "no_evidence": "无可用依据",
+            "safe_fail": "安全终止",
+            "finish": "检索结束",
+        }
+        decision_label = decision_labels.get(
+            event_data.get("decision"),
+        )
+        if decision_label:
+            return f"{stage_label}（{decision_label}）"
     return stage_label
 
 

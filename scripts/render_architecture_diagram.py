@@ -212,7 +212,7 @@ def render() -> Path:
         draw,
         1780,
         48,
-        "基线 718b77a",
+        "Agent Loop MVP",
         fill="#E8F1FB",
         border=CLIENT_BORDER,
     )
@@ -301,7 +301,7 @@ def render() -> Path:
     draw_lane(
         draw,
         (55, 575, 2145, 870),
-        "固定 LangGraph 工作流（16 个节点，无动态调度）",
+        "固定 LangGraph 工作流（17 个节点，无动态调度）",
         fill="#FFFAED",
         border=AGENT_BORDER,
     )
@@ -309,7 +309,7 @@ def render() -> Path:
         (80, "dialogue", "规范化 · 5 轮改写"),
         (410, "intent", "实体预匹配 · 领域意图"),
         (740, "entity", "候选抽取 · exact / fuzzy / FAISS"),
-        (1070, "retrieval", "真实规划 Agent · 受控计划选择"),
+        (1070, "retrieval", "受控循环 · 规划 → 观察 → 再规划"),
         (1400, "answer", "图谱回答 · 非中医直接回答"),
         (1730, "evidence_audit", "逐项支持校验 · 证据化回退"),
     )

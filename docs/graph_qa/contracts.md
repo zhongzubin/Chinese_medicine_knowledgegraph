@@ -243,6 +243,29 @@ RetrievalPlanningResult
 
 `rejected` 必须包含稳定错误码和可重试的具体校验错误。任何结果都不得绕过后续 Guard、只读仓储和确定性证据校验。
 
+检索 Agent 使用最大三次 `plan → validate/execute → observe` 循环：
+
+```text
+RetrievalLoopObservation
+- step: int
+- max_steps: int
+- plan_kind: str | null
+- is_valid: bool
+- error_code: str | null
+- attribute_relation_fallback: bool
+- has_context: bool
+- row_count: int
+```
+
+```text
+RetrievalLoopDecision
+- next_action: replan | answer_from_graph |
+               no_evidence | safe_fail | finish
+- reason_code: str
+```
+
+`replan` 只能回到既有受控规划目录。执行错误直接结束，校验失败或属性空回退在预算内重新规划，有可验证上下文时进入回答，无上下文时进入无依据，预算耗尽进入安全失败。循环轨迹不包含模型隐藏推理。
+
 ### 4.5 Cypher 计划
 
 ```text
@@ -549,7 +572,7 @@ HTTP 响应不得默认暴露原始提示词、模型隐藏推理和完整数据
 
 | 事件 | 数据 |
 | --- | --- |
-| `stage` | `stage`、中文 `label`、对应 `agent`；`plan_cypher` 另含 `plan_kind` 和中文 `plan_label` |
+| `stage` | `stage`、中文 `label`、对应 `agent`；`plan_cypher` 另含 `plan_kind`/`plan_label`，`retrieve_observe` 另含 `step`/`decision`/`reason_code` |
 | `evidence` | `items` 数组 |
 | `facts` | `items` 数组，属性事实 |
 | `aggregates` | `items` 数组，受控计数结果 |
@@ -593,6 +616,7 @@ M1 CLI 和评测继续使用无会话调用，不依赖 Redis 会话状态。
 - `GraphQAResponse.verification` 和 SSE `audit` 是向后兼容的新增字段。
 - SSE `stage.data.agent` 是向后兼容的新增字段，调用方不应依赖固定阶段数量。
 - `query.plan_kind`、SSE `stage.data.plan_kind` 和 `plan_label` 是向后兼容的新增字段，不包含 Cypher 或模型推理。
+- SSE `retrieve_observe` 的 `step`、`decision` 和 `reason_code` 是向后兼容的安全循环状态，不包含隐藏推理。
 - 安全错误码不得改为“成功但无结果”。
 - 图元数据版本变化时，必须运行实体索引和黄金问题集回归。
 - 测试和日志中不得出现真实模型密钥、数据库密码或完整用户健康文本。

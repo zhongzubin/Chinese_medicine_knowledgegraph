@@ -2,7 +2,17 @@
 """受控图谱检索规划 Agent。"""
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import (
+    Any,
+    Dict,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from graph_qa.agents.base import AgentDescriptor
 from graph_qa.llm import ReasonerError
@@ -126,6 +136,30 @@ class RelationshipSelection:
     entities: Tuple[LinkedEntity, ...]
 
 
+@dataclass(frozen=True)
+class RetrievalLoopObservation:
+    step: int
+    max_steps: int
+    plan_kind: Optional[str]
+    is_valid: bool
+    error_code: Optional[str]
+    attribute_relation_fallback: bool
+    has_context: bool
+    row_count: int
+
+
+@dataclass(frozen=True)
+class RetrievalLoopDecision:
+    next_action: Literal[
+        "replan",
+        "answer_from_graph",
+        "no_evidence",
+        "safe_fail",
+        "finish",
+    ]
+    reason_code: str
+
+
 def requested_attributes(question: str) -> List[str]:
     requested: List[str] = []
     for terms, attributes in ATTRIBUTE_TERM_MAP:
@@ -231,10 +265,15 @@ class RetrievalAgent:
         default=AgentDescriptor(
             name="retrieval",
             responsibility=(
-                "基于已链接实体选择受控查询计划；"
+                "受控查询规划与结果观察；"
                 "安全校验和只读执行由确定性层承担"
             ),
-            stages=("plan_cypher", "validate_cypher", "execute_cypher"),
+            stages=(
+                "plan_cypher",
+                "validate_cypher",
+                "execute_cypher",
+                "retrieve_observe",
+            ),
             tools=(
                 "controlled_query_catalog",
                 "schema_constrained_text2cypher",
@@ -292,6 +331,50 @@ class RetrievalAgent:
             )
 
         return self._generate_schema_constrained_cypher(request)
+
+    def observe(
+        self,
+        observation: RetrievalLoopObservation,
+    ) -> RetrievalLoopDecision:
+        """根据本轮工具结果决定继续规划还是结束。"""
+        if observation.error_code:
+            return RetrievalLoopDecision(
+                next_action="finish",
+                reason_code="EXECUTION_ERROR",
+            )
+        if not observation.is_valid:
+            if observation.step < observation.max_steps:
+                return RetrievalLoopDecision(
+                    next_action="replan",
+                    reason_code="VALIDATION_RETRY",
+                )
+            return RetrievalLoopDecision(
+                next_action="safe_fail",
+                reason_code="VALIDATION_RETRIES_EXHAUSTED",
+            )
+        if observation.attribute_relation_fallback:
+            if observation.step < observation.max_steps:
+                return RetrievalLoopDecision(
+                    next_action="replan",
+                    reason_code="ATTRIBUTE_EMPTY_RELATION_FALLBACK",
+                )
+            return RetrievalLoopDecision(
+                next_action="safe_fail",
+                reason_code="RETRIEVAL_STEPS_EXHAUSTED",
+            )
+        if observation.has_context:
+            return RetrievalLoopDecision(
+                next_action="answer_from_graph",
+                reason_code="VERIFIABLE_CONTEXT_AVAILABLE",
+            )
+        return RetrievalLoopDecision(
+            next_action="no_evidence",
+            reason_code=(
+                "QUERY_RETURNED_NO_ROWS"
+                if observation.row_count == 0
+                else "NO_VERIFIABLE_CONTEXT"
+            ),
+        )
 
     @staticmethod
     def _controlled_result(

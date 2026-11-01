@@ -68,11 +68,11 @@
 
 ### 2.4 当前问答与评测
 
-- 当前 LangGraph 工作流包含 16 个节点。
+- 当前 LangGraph 工作流包含 17 个节点，其中包含受控检索 Agent 观察节点。
 - 已实现精确名称、别名、fuzzy 和 BGE + FAISS 实体召回。
 - 单跳关系查询以单三元组路径和固定证据字段为基础，并已增加多条件交集列表和四种白名单两跳。
 - Redis 已支持最近 5 轮问题、回答、已链接实体和 grounded 状态。
-- 当前全量测试为 221 passed、5 skipped。
+- 当前全量测试为 227 passed、5 skipped。
 - 当前 120 条固定评测 outcome 为 119/120，完整工作流实体 Recall@3 为 97.78%。
 - 原 120 条评测仍未覆盖属性事实，也没有显式 `no_evidence` 用例。
 
@@ -320,7 +320,7 @@ flowchart LR
 
 ### P4 独立 Agent 演进
 
-状态：检索规划和证据审核 Agent 已落地；独立拓扑和动态调度未完成。
+状态：检索 Agent 闭环和证据审核已落地；独立子图和动态调度未完成。
 
 目标：在查询、证据和会话契约稳定后，再抽象问题理解、检索规划、证据审核和回答组织角色。
 
@@ -333,6 +333,7 @@ flowchart LR
 - `evidence_audit` 已成为真实 Agent，负责逐项支持校验、来源覆盖计数和证据化回退。
 - `AnswerVerification` 通过 API `verification`、SSE `audit`、CLI 和 Streamlit 展示。
 - `retrieval` 已成为真实、可测试的确定性规划 Agent，具有独立输入输出契约、固定计划目录和模型回退边界。
+- `retrieval` 已形成最大三次的 `plan → act → observe → replan` 闭环：观察校验、执行、空属性和证据结果，并决定重规划、回答、无依据或安全终止。
 - `RetrievalAgent` 不持有 Guard 和仓储；查询执行、确定性证据校验和用户回答审核边界保持不变。
 - 查询策略通过 API `query.plan_kind`、SSE `plan_cypher.plan_kind` 和 Streamlit 进度标签公开。
 
