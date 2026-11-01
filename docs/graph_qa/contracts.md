@@ -1,9 +1,9 @@
 # 知识图谱问答数据与接口契约
 
-> 文档状态：当前实现基线 v1.0
+> 文档状态：当前实现基线 v1.2
 >
-> 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit
-> 最后更新：2026-10-28
+> 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit、查询扩展与 Agent 基础层
+> 最后更新：2026-11-01
 
 本文定义 CLI、内部模块、FastAPI、Redis 会话、SSE 和 Streamlit 客户端必须遵守的当前契约。
 
@@ -106,7 +106,8 @@ CLI 不读取交互式标准输入。Streamlit 通过 FastAPI 服务接口接入
     "cypher": "MATCH ... RETURN ... LIMIT 50",
     "parameters": {
       "entity_names": ["麻黄"]
-    }
+    },
+    "plan_kind": "controlled_relationship"
   },
   "evidence": [
     {
@@ -119,6 +120,9 @@ CLI 不读取交互式标准输入。Streamlit 通过 FastAPI 服务接口接入
     }
   ],
   "facts": [],
+  "aggregates": [],
+  "paths": [],
+  "verification": null,
   "warnings": [],
   "error": null
 }
@@ -138,6 +142,9 @@ CLI 不读取交互式标准输入。Streamlit 通过 FastAPI 服务接口接入
   "query": null,
   "evidence": [],
   "facts": [],
+  "aggregates": [],
+  "paths": [],
+  "verification": null,
   "warnings": [],
   "error": {
     "code": "CYPHER_REJECTED",
@@ -195,7 +202,44 @@ LinkedEntity
 
 同一 `(label, name)` 只保留分数最高的结果。不同标签的同名实体不得去重。
 
-### 4.4 Cypher 计划
+### 4.4 检索规划
+
+`RetrievalAgent` 使用独立输入和输出契约。输入只包含已确认的上下文数据，不包含仓储、Cypher Guard 或执行权限：
+
+```text
+RetrievalPlanningInput
+- question: str
+- linked_entities: list[LinkedEntity], 至少 1 个
+- validation_errors: list[str]
+- attribute_query_attempted: bool
+- query_attempts: int
+```
+
+```text
+RetrievalPlanningResult
+- plan_kind: controlled_multi_hop | controlled_attribute |
+             controlled_aggregate | controlled_multi_condition_list |
+             controlled_relationship | schema_constrained_cypher | rejected
+- plan: 以下现有计划对象之一或 null
+- query_attempts: int
+- validation_errors: list[str]
+- last_error_code: ErrorCode | null
+```
+
+非 `rejected` 结果必须携带且只携带一个与 `plan_kind` 匹配的计划对象。模板计划不增加 Text2Cypher 尝试次数；只有 Schema 约束回退会增加。Agent 只能调用受限模型生成器，不能调用 Guard、`EXPLAIN` 或仓储。
+
+固定规划优先级为：
+
+1. 白名单两跳。
+2. 白名单属性。
+3. 受控计数。
+4. 多条件结果列表。
+5. 唯一方向关系模板。
+6. Schema 约束 Text2Cypher。
+
+`rejected` 必须包含稳定错误码和可重试的具体校验错误。任何结果都不得绕过后续 Guard、只读仓储和确定性证据校验。
+
+### 4.5 Cypher 计划
 
 ```text
 CypherPlan
@@ -215,7 +259,7 @@ UsedEntityRef
 
 `used_entities` 只能引用已经链接成功的实体。工作流负责把 `UsedEntityRef` 与完整 `LinkedEntity` 对应，不要求模型重复生成匹配分数。
 
-### 4.5 查询结果
+### 4.6 查询结果
 
 ```text
 QueryResult
@@ -229,7 +273,7 @@ QueryResult
 
 `rows` 必须全部可 JSON 序列化。节点和关系在进入答案层前转换为明确字段，不传入驱动对象。
 
-### 4.6 证据
+### 4.7 证据
 
 ```text
 Evidence
@@ -247,7 +291,7 @@ Evidence
 `used_entities` 的 `(label, name)` 相同；与全部计划目标无关的证据必须丢弃。
 没有目标证据时返回 `NO_GRAPH_EVIDENCE`，不得标记为 `grounded=true`。
 
-### 4.7 属性事实
+### 4.8 属性事实
 
 节点属性使用独立事实结构，不伪装成关系证据：
 
@@ -270,6 +314,101 @@ AttributeFact
 
 `GraphQAResponse.facts` 为新增可选数组，默认空。该变化属于向后兼容的字段增加，当前 `schema_version` 仍为 `1.0`。
 
+### 4.9 聚合事实
+
+受控一跳计数使用独立结构：
+
+```text
+AggregateFact
+- anchor: str
+- anchor_label: str
+- relationship: str
+- result_label: str
+- direction: outgoing | incoming
+- count: int
+- description: str
+```
+
+聚合查询只允许已存在的 Schema 三元组模式和单跳 `count(DISTINCT ...)`。`require_all_entities=true` 时，每个已链接实体都必须满足同一条 Schema 关系，用于交集计数。`GraphQAResponse.aggregates` 默认空数组，不把计数伪装成节点属性或关系证据。
+
+### 4.10 多条件结果列表
+
+“同时含有人参和白术的方剂有哪些”等非计数问题使用独立受控计划：
+
+```text
+MultiConditionQueryPlan
+- subject_label: str
+- relationship: str
+- object_label: str
+- used_entities: list[UsedEntityRef], 至少 2 个
+- description: str
+```
+
+执行时每个必需实体都必须通过固定的 `EXISTS` 条件，结果取多个条件的交集。返回记录仍转换为 `Evidence`，以展示结果实体与每个命中条件的关系和来源。该模式不调用模型自由排序、补写结果或生成任意聚合。
+
+### 4.11 受控多跳路径
+
+两跳查询使用显式、Schema 白名单内的路径计划：
+
+```text
+MultiHopStep
+- subject_label: str
+- relationship: str
+- object_label: str
+
+MultiHopQueryPlan
+- steps: list[MultiHopStep], 当前固定为 2 步
+- used_entities: list[UsedEntityRef]
+- description: str
+
+PathEvidence
+- root: str
+- root_label: str
+- first_relationship: str
+- intermediate: str
+- intermediate_label: str
+- second_relationship: str
+- target: str
+- target_label: str
+- source: str | null
+```
+
+当前只允许以下两跳模式：
+
+1. `Formula -HAS_INGREDIENT-> Herb -HAS_EFFECT-> Effect`
+2. `Formula -HAS_INGREDIENT-> Herb -TREATS_DISEASE-> Disease`
+3. `Formula -HAS_INGREDIENT-> Herb -ALLEVIATES_SYMPTOM-> Symptom`
+4. `Herb -TREATS_DISEASE-> Disease -HAS_SYMPTOM-> Symptom`
+
+两步节点链必须连续，每一步都必须通过 Schema 校验。`GraphQAResponse.paths` 默认空数组；任意深度、变量长度路径和模型自由规划不在当前契约内。
+
+### 4.12 回答校验
+
+图谱回答经过确定性证据审核后返回：
+
+```text
+AnswerVerification
+- status: passed | fallback
+- agent: evidence_audit
+- checked_items: int
+- matched_items: int
+- evidence_items: int
+- fact_items: int
+- aggregate_items: int
+- path_items: int
+- missing_sources: int
+- fallback_used: bool
+- message: str
+```
+
+- `checked_items` 是本轮可核对的关系、属性、统计和路径条目总数。
+- `matched_items` 是原回答逐项覆盖的条目数。
+- 只有 `matched_items == checked_items` 且存在待核对条目时，`status` 才为 `passed`。
+- 覆盖不完整、空回答或缺少待核对条目时，系统使用证据化回答，`status=fallback`、`fallback_used=true`。
+- `missing_sources` 统计关系、属性和路径条目中 `source=null` 的数量；统计结果不单独计入来源缺失。
+
+该审核只做确定性文本覆盖检查，不是模型自由评分，也不等价于完整医学事实审核。`GraphQAResponse.verification` 默认为空；只有进入图谱回答审核的工作流才设置。
+
 ## 5. 大模型输出契约
 
 ### 5.1 意图分类
@@ -285,10 +424,13 @@ AttributeFact
 
 查询规划优先级固定为：
 
-1. 属性问题优先使用白名单属性模板，不调用模型生成属性查询。
-2. 高频关系问题在 Schema 方向和问题指向唯一时使用固定关系模板，支持正向和反向查询。
-3. 模板无法唯一覆盖时，才调用模型生成受 Schema 约束的 Text2Cypher。
-4. 所有关系模板和 Text2Cypher 结果都必须经过同一个只读校验器。
+1. 同时要求两个受控关系且匹配唯一白名单路径时，使用两跳模板。
+2. 属性问题使用白名单属性模板，不调用模型生成属性查询。
+3. 明确的“多少、几个、几种”问题在 Schema 方向和问题指向唯一时使用受控计数模板。
+4. 非计数且同时要求多个实体时，使用多条件交集结果列表模板。
+5. 高频关系问题在 Schema 方向和问题指向唯一时使用固定关系模板，支持正向和反向查询。
+6. 受控模板无法覆盖时，才调用模型生成受 Schema 约束的 Text2Cypher。
+7. 所有关系模板、多条件、多跳和 Text2Cypher 结果都必须经过对应结构校验。
 
 当属性字段为空且问题涉及“功效”或“主治”时，允许受控回退到对应关系查询；其他属性为空时直接返回无可验证依据。
 
@@ -325,7 +467,7 @@ AttributeFact
 
 回答节点输出纯文本。输入可以同时包含关系 `Evidence` 和属性 `AttributeFact`。引用内容由程序根据两类证据渲染，不由模型自行编造引用编号。涉及来源时使用图谱中的 `Source.name`。
 
-回答生成后必须执行证据支持检查。若模型回答没有包含任何本轮对象事实或属性值，系统应替换为基于证据的简化回答并返回警告。
+回答生成后必须执行逐项证据支持检查。回答需要覆盖全部本轮关系对象、属性事实、统计描述和路径节点；部分覆盖或空回答应替换为基于证据的简化回答并返回警告及结构化 `verification`。
 
 ## 6. Neo4j 仓储接口
 
@@ -333,9 +475,12 @@ AttributeFact
 
 ```text
 load_entity_index() -> EntityIndex
-explain(cypher, parameters) -> None | raises QueryValidationError
-execute_read(cypher, parameters, timeout, max_rows) -> QueryResult
+explain(plan) -> None | raises QueryValidationError
+execute_read(plan) -> QueryResult
 execute_attributes(attribute_plan) -> QueryResult
+execute_aggregate(aggregate_plan) -> QueryResult
+execute_multi_condition_list(multi_condition_plan) -> QueryResult
+execute_multi_hop(multi_hop_plan) -> QueryResult
 ```
 
 仓储责任：
@@ -344,6 +489,9 @@ execute_attributes(attribute_plan) -> QueryResult
 - 在只读事务中执行查询。
 - 应用超时和结果上限。
 - 属性查询使用固定 Cypher 模板，不接受模型生成的任意属性查询。
+- 聚合查询使用固定单跳/交集计数模板，不允许聚合表达式或标签由模型任意生成。
+- 多条件列表使用固定 `EXISTS` 交集模板，不允许模型自由拼接条件或结果。
+- 多跳查询只接受两步、节点连续且每一步都通过 Schema 白名单的计划。
 - 将驱动返回对象转换为可序列化数据。
 - 不拼接用户输入，不生成 Cypher，不调用大模型。
 
@@ -371,6 +519,7 @@ session_id: optional uuid
 
 - `session_id`：本轮会话 ID。
 - `rewritten_question`：结合历史改写后的独立问题，便于调试指代。
+- `query.plan_kind`：本轮选中的稳定检索策略代码；查询未形成时为 `null`。
 
 成功响应和业务错误继续使用 `GraphQAResponse`。推荐 HTTP 状态映射：
 
@@ -396,9 +545,12 @@ HTTP 响应不得默认暴露原始提示词、模型隐藏推理和完整数据
 
 | 事件 | 数据 |
 | --- | --- |
-| `stage` | `stage`、中文 `label` |
+| `stage` | `stage`、中文 `label`、对应 `agent`；`plan_cypher` 另含 `plan_kind` 和中文 `plan_label` |
 | `evidence` | `items` 数组 |
 | `facts` | `items` 数组，属性事实 |
+| `aggregates` | `items` 数组，受控计数结果 |
+| `paths` | `items` 数组，受控多跳路径 |
+| `audit` | 完整 `AnswerVerification` 对象 |
 | `answer_delta` | `delta` 文本 |
 | `warning` | `message` |
 | `error` | 稳定错误码与消息 |
@@ -433,6 +585,10 @@ M1 CLI 和评测继续使用无会话调用，不依赖 Redis 会话状态。
 ## 9. 兼容性要求
 
 - 结果对象增加字段允许向后兼容，删除或重命名字段需要升级 `schema_version`。
+- `GraphQAResponse.paths` 和 SSE `paths` 是向后兼容的新增字段。
+- `GraphQAResponse.verification` 和 SSE `audit` 是向后兼容的新增字段。
+- SSE `stage.data.agent` 是向后兼容的新增字段，调用方不应依赖固定阶段数量。
+- `query.plan_kind`、SSE `stage.data.plan_kind` 和 `plan_label` 是向后兼容的新增字段，不包含 Cypher 或模型推理。
 - 安全错误码不得改为“成功但无结果”。
 - 图元数据版本变化时，必须运行实体索引和黄金问题集回归。
 - 测试和日志中不得出现真实模型密钥、数据库密码或完整用户健康文本。

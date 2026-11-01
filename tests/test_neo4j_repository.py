@@ -6,9 +6,13 @@ import pytest
 
 from graph_qa.cypher_guard import CypherGuard, CypherGuardError
 from graph_qa.models import (
+    AggregateQueryPlan,
     AttributeQueryPlan,
     AttributeSelection,
     CypherPlan,
+    MultiConditionQueryPlan,
+    MultiHopQueryPlan,
+    MultiHopStep,
     UsedEntityRef,
 )
 from graph_qa.neo4j_repository import (
@@ -55,13 +59,21 @@ def make_schema() -> GraphSchema:
                 }
                 for label in ("Herb", "Formula", "Disease", "Symptom", "Effect", "Source")
             ],
-            "relationship_types": [{"type": "HAS_EFFECT"}],
+            "relationship_types": [
+                {"type": "HAS_EFFECT"},
+                {"type": "HAS_INGREDIENT"},
+            ],
             "triple_patterns": [
                 {
                     "subject_label": "Herb",
                     "relationship_type": "HAS_EFFECT",
                     "object_label": "Effect",
-                }
+                },
+                {
+                    "subject_label": "Formula",
+                    "relationship_type": "HAS_INGREDIENT",
+                    "object_label": "Herb",
+                },
             ],
         }
     )
@@ -289,3 +301,155 @@ def test_execute_attributes_rejects_non_whitelisted_field():
         repository.execute_attributes(plan)
 
     assert session.begin_calls == []
+
+
+def test_execute_aggregate_counts_distinct_related_entities():
+    session = FakeSession(query_rows=[{"count": 4}])
+    repository, _driver = make_repository(session)
+    plan = AggregateQueryPlan(
+        subject_label="Formula",
+        relationship="HAS_INGREDIENT",
+        object_label="Herb",
+        used_entities=[UsedEntityRef(label="Formula", name="四君子汤")],
+        direction="outgoing",
+        description="四君子汤关联的药材",
+    )
+
+    result = repository.execute_aggregate(plan)
+
+    assert result.rows == [{"count": 4}]
+    query, parameters = session.transaction.queries[0]
+    assert "count(DISTINCT object)" in query
+    assert parameters == {"entity_names": ["四君子汤"]}
+
+
+def test_execute_aggregate_rejects_wrong_anchor_direction():
+    session = FakeSession(query_rows=[])
+    repository, _driver = make_repository(session)
+    plan = AggregateQueryPlan(
+        subject_label="Formula",
+        relationship="HAS_INGREDIENT",
+        object_label="Herb",
+        used_entities=[UsedEntityRef(label="Herb", name="人参")],
+        direction="outgoing",
+        description="人参关联的方剂",
+    )
+
+    with pytest.raises(RepositoryError, match="关系方向不匹配"):
+        repository.execute_aggregate(plan)
+
+    assert session.begin_calls == []
+
+
+def test_execute_aggregate_requires_all_entities_for_intersection():
+    session = FakeSession(query_rows=[{"count": 7}])
+    repository, _driver = make_repository(session)
+    plan = AggregateQueryPlan(
+        subject_label="Formula",
+        relationship="HAS_INGREDIENT",
+        object_label="Herb",
+        used_entities=[
+            UsedEntityRef(label="Herb", name="人参"),
+            UsedEntityRef(label="Herb", name="白术"),
+        ],
+        direction="incoming",
+        require_all_entities=True,
+        description="同时关联到人参、白术的方剂",
+    )
+
+    result = repository.execute_aggregate(plan)
+
+    assert result.rows == [{"count": 7}]
+    query, parameters = session.transaction.queries[0]
+    assert query.count("EXISTS") == 2
+    assert parameters == {
+        "entity_0": "人参",
+        "entity_1": "白术",
+    }
+
+
+def test_execute_multi_condition_list_returns_subject_conditions():
+    rows = [
+        {
+            "subject": "四君子汤",
+            "subject_label": "Formula",
+            "conditions": [
+                {
+                    "relationship": "HAS_INGREDIENT",
+                    "object": "人参",
+                    "object_label": "Herb",
+                    "sources": [],
+                },
+                {
+                    "relationship": "HAS_INGREDIENT",
+                    "object": "白术",
+                    "object_label": "Herb",
+                    "sources": ["《局方》"],
+                },
+            ],
+        }
+    ]
+    session = FakeSession(query_rows=rows)
+    repository, _driver = make_repository(session)
+    plan = MultiConditionQueryPlan(
+        subject_label="Formula",
+        relationship="HAS_INGREDIENT",
+        object_label="Herb",
+        used_entities=[
+            UsedEntityRef(label="Herb", name="人参"),
+            UsedEntityRef(label="Herb", name="白术"),
+        ],
+        description="同时关联到人参、白术的方剂",
+    )
+
+    result = repository.execute_multi_condition_list(plan)
+
+    assert result.rows == rows
+    query, parameters = session.transaction.queries[0]
+    assert query.count("EXISTS") == 2
+    assert "collect(DISTINCT" in query
+    assert parameters["entity_0"] == "人参"
+    assert parameters["entity_1"] == "白术"
+    assert parameters["entity_names"] == ["人参", "白术"]
+
+
+def test_execute_multi_hop_returns_two_step_paths():
+    rows = [
+        {
+            "root": "四君子汤",
+            "root_label": "Formula",
+            "first_relationship": "HAS_INGREDIENT",
+            "intermediate": "人参",
+            "intermediate_label": "Herb",
+            "second_relationship": "HAS_EFFECT",
+            "target": "补气",
+            "target_label": "Effect",
+            "sources": [],
+        }
+    ]
+    session = FakeSession(query_rows=rows)
+    repository, _driver = make_repository(session)
+    plan = MultiHopQueryPlan(
+        steps=[
+            MultiHopStep(
+                subject_label="Formula",
+                relationship="HAS_INGREDIENT",
+                object_label="Herb",
+            ),
+            MultiHopStep(
+                subject_label="Herb",
+                relationship="HAS_EFFECT",
+                object_label="Effect",
+            ),
+        ],
+        used_entities=[UsedEntityRef(label="Formula", name="四君子汤")],
+        description="四君子汤所含药材的功效",
+    )
+
+    result = repository.execute_multi_hop(plan)
+
+    assert result.rows == rows
+    query, parameters = session.transaction.queries[0]
+    assert "first:HAS_INGREDIENT" in query
+    assert "second:HAS_EFFECT" in query
+    assert parameters == {"entity_names": ["四君子汤"]}

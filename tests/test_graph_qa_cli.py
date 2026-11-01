@@ -7,10 +7,13 @@ from argparse import Namespace
 from graph_qa import cli
 from graph_qa.cli import CLIConfigError, parse_args, render_text, run
 from graph_qa.models import (
+    AggregateFact,
+    AnswerVerification,
     AttributeFact,
     ErrorCode,
     Evidence,
     GraphQAResponse,
+    PathEvidence,
     QueryInfo,
 )
 
@@ -94,6 +97,82 @@ def test_render_text_includes_attribute_fact_and_source():
     assert "图谱属性" in output
     assert "性味：辛、微苦，温" in output
     assert "《中药大辞典》" in output
+
+
+def test_render_text_includes_aggregate_result():
+    response = GraphQAResponse(
+        question="含有人参的方剂有多少种？",
+        answer="根据当前图谱统计，关联到人参的方剂共有 7 个。",
+        grounded=True,
+        aggregates=[
+            AggregateFact(
+                anchor="人参",
+                anchor_label="Herb",
+                relationship="HAS_INGREDIENT",
+                result_label="Formula",
+                direction="incoming",
+                count=7,
+                description="关联到人参的方剂",
+            )
+        ],
+    )
+
+    output = render_text(response)
+
+    assert "图谱统计" in output
+    assert "关联到人参的方剂：7" in output
+
+
+def test_render_text_includes_multi_hop_path():
+    response = GraphQAResponse(
+        question="四君子汤所含药材有什么功效？",
+        answer="四君子汤所含人参具有补气功效。",
+        grounded=True,
+        paths=[
+            PathEvidence(
+                root="四君子汤",
+                root_label="Formula",
+                first_relationship="HAS_INGREDIENT",
+                intermediate="人参",
+                intermediate_label="Herb",
+                second_relationship="HAS_EFFECT",
+                target="补气",
+                target_label="Effect",
+            )
+        ],
+    )
+
+    output = render_text(response)
+
+    assert "多跳路径" in output
+    assert "HAS_INGREDIENT" in output
+    assert "HAS_EFFECT" in output
+
+
+def test_render_text_includes_answer_verification():
+    response = GraphQAResponse(
+        question="麻黄有什么功效？",
+        answer="麻黄具有发汗功效。",
+        grounded=True,
+        verification=AnswerVerification(
+            status="passed",
+            checked_items=3,
+            matched_items=3,
+            evidence_items=2,
+            fact_items=1,
+            aggregate_items=0,
+            path_items=0,
+            missing_sources=1,
+            fallback_used=False,
+            message="已核对 3 项图谱证据，回答包含可追溯事实。",
+        ),
+    )
+
+    output = render_text(response)
+
+    assert "回答校验" in output
+    assert "已通过证据支持校验" in output
+    assert "缺失来源 1 项" in output
 
 
 def test_run_json_output_and_closes_repository():

@@ -5,6 +5,9 @@ import operator
 from typing import Annotated, List, Optional, TypedDict
 
 from graph_qa.models import (
+    AggregateFact,
+    AggregateQueryPlan,
+    AnswerVerification,
     AttributeFact,
     AttributeQueryPlan,
     CypherPlan,
@@ -13,7 +16,11 @@ from graph_qa.models import (
     Evidence,
     IntentResult,
     LinkedEntity,
+    MultiConditionQueryPlan,
+    MultiHopQueryPlan,
+    PathEvidence,
     QueryResult,
+    RetrievalPlanKind,
 )
 
 
@@ -33,7 +40,11 @@ class AgentState(TypedDict, total=False):
     attribute_plan: Optional[AttributeQueryPlan]
     attribute_query_attempted: bool
     attribute_relation_fallback: bool
+    aggregate_plan: Optional[AggregateQueryPlan]
+    multi_condition_plan: Optional[MultiConditionQueryPlan]
+    multi_hop_plan: Optional[MultiHopQueryPlan]
     cypher_plan: Optional[CypherPlan]
+    retrieval_plan_kind: Optional[RetrievalPlanKind]
     query_attempts: int
     validation_errors: Annotated[List[str], operator.add]
     last_error_code: Optional[str]
@@ -45,6 +56,9 @@ class AgentState(TypedDict, total=False):
     query_result: Optional[QueryResult]
     evidence: List[Evidence]
     facts: List[AttributeFact]
+    aggregates: List[AggregateFact]
+    paths: List[PathEvidence]
+    verification: Optional[AnswerVerification]
     answer: str
     grounded: bool
     warnings: Annotated[List[str], operator.add]

@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 """实体链接器测试。"""
 
-from graph_qa.entity_linker import EntityIndex, EntityRecord
+from graph_qa.entity_linker import (
+    EntityIndex,
+    EntityRecord,
+    normalize_question_boundaries,
+)
 from graph_qa.models import EntityCandidate, LinkedEntity
 
 
@@ -51,6 +55,30 @@ def test_direct_question_match_prefers_longest_entity_term():
         ("Disease", "风热咳嗽"),
         ("Symptom", "风热咳嗽"),
     }
+
+
+def test_direct_question_match_finds_multiple_list_entities():
+    index = EntityIndex.from_records(
+        [
+            EntityRecord("Herb", "人参"),
+            EntityRecord("Herb", "白术"),
+            EntityRecord("Herb", "茯苓"),
+        ]
+    )
+
+    linked = index.match_exact("同时含有人参、白术和茯苓的方剂有哪些？")
+
+    assert {(item.label, item.name) for item in linked} == {
+        ("Herb", "人参"),
+        ("Herb", "白术"),
+        ("Herb", "茯苓"),
+    }
+
+
+def test_question_boundary_normalization_preserves_list_separators():
+    assert normalize_question_boundaries("人参、白术和茯苓") == (
+        "人参|白术和茯苓"
+    )
 
 
 def test_direct_question_match_rejects_short_entity_inside_unknown_compound():

@@ -99,7 +99,7 @@ def _outcome_matched(step: MultiTurnStep, response: GraphQAResponse) -> bool:
         return (
             error_code is None
             and response.grounded
-            and bool(response.evidence or response.facts)
+            and bool(response.evidence or response.facts or response.aggregates)
         )
     if step.expected_outcome == "direct_answer":
         return error_code is None and not response.grounded

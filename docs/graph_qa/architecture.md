@@ -1,9 +1,9 @@
 # 可验证知识图谱问答架构
 
-> 文档状态：开发基线 v0.1
+> 文档状态：当前实现基线 v1.2
 >
-> 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit
-> 最后更新：2026-10-28
+> 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit、查询扩展与 Agent 基础层
+> 最后更新：2026-11-01
 
 ## 1. 架构目标
 
@@ -59,12 +59,15 @@ flowchart TB
 
 | 模块 | 职责 | 明确不负责 |
 | --- | --- | --- |
-| `models.py` | 请求、意图、实体候选、属性/关系计划、事实、证据和结果模型 | 网络调用和业务路由 |
+| `models.py` | 请求、意图、实体候选、属性/关系/聚合计划、事实、证据和结果模型 | 网络调用和业务路由 |
 | `state.py` | LangGraph 状态定义和初始化 | 持久化会话 |
 | `prompts.py` | 意图、实体抽取、Cypher 生成和回答提示词 | 读取数据库 |
+| `agents/` | Agent 描述、唯一注册表、角色对象和阶段映射 | 改变 Cypher 安全边界或替代确定性查询 |
+| `agents/retrieval.py` | 基于已链接实体和 Schema 选择受控查询计划 | 校验或执行任意 Cypher、访问图数据库 |
+| `agents/evidence_audit.py` | 逐项证据覆盖、缺失来源统计和证据化回退 | 自由判断医学事实或放宽证据边界 |
 | `entity_linker.py` | 名称规范化、别名索引、候选匹配 | 自行生成实体名称 |
 | `cypher_guard.py` | 单语句、只读、元数据白名单、LIMIT 和参数检查 | 执行查询 |
-| `neo4j_repository.py` | 元数据加载、图实体读取、属性模板、`EXPLAIN` 和只读查询 | 生成回答 |
+| `neo4j_repository.py` | 元数据加载、图实体读取、属性/聚合模板、`EXPLAIN` 和只读查询 | 生成回答 |
 | `workflow.py` | LangGraph 节点、查询规划、条件路由、答案校验和失败收口 | 暴露模型隐藏思维 |
 | `semantic_index.py` | BGE-large 编码、FAISS Top-3 和索引缓存 | 决定图数据库事实 |
 | `session_store.py` | 5 轮会话、TTL 和会话锁 | 保存完整执行状态 |
@@ -89,15 +92,23 @@ flowchart TB
 | `conversation_history` | Redis 加载的最近 5 轮问题、回答和实体 |
 | `rewritten_question` | 用于本轮后续步骤的独立、完整问题 |
 | `session_id` | 当前对话标识，由 API 客户端作用域隔离 |
-| `is_tcm_question` | 是否属于当前图谱范围 |
-| `intent_confidence` | 意图分类置信度，仅用于路由和诊断 |
+| `intent` | 结构化的领域意图与置信度，仅用于路由和诊断 |
 | `entity_candidates` | 大模型抽取的实体候选 |
 | `linked_entities` | 带 `label` 和 `name` 的图谱实体 |
-| `cypher` | 候选查询和参数 |
+| `attribute_plan` | 白名单属性查询计划 |
+| `aggregate_plan` | 受控单跳或交集计数计划 |
+| `multi_condition_plan` | 同时满足多个实体条件的结果列表计划 |
+| `multi_hop_plan` | 仅包含两个步骤的白名单路径计划 |
+| `cypher_plan` | Text2Cypher 候选查询和参数 |
+| `retrieval_plan_kind` | 本轮最终选中的受控查询策略，用于响应和公开阶段展示 |
 | `validation_errors` | 安全或语法校验问题 |
 | `query_attempts` | 已生成查询的次数 |
-| `query_rows` | 实际返回结果 |
+| `query_result` | 实际返回的受控查询结果 |
 | `evidence` | 支持回答的实体、关系和来源 |
+| `facts` | 支持回答的属性事实 |
+| `aggregates` | 受控计数结果 |
+| `paths` | 受控两跳的逐跳路径证据 |
+| `verification` | 本轮回答审核状态、覆盖计数和来源统计 |
 | `answer` | 最终回答 |
 | `warnings` | 检索范围、模型降级等用户可见提示 |
 | `error_code` | 稳定错误码 |
@@ -105,7 +116,22 @@ flowchart TB
 
 不存储或向前端返回模型内部思维链。需要解释过程时，只显示“识别意图”“匹配实体”“查询图谱”等可验证阶段。
 
-### 4.2 路由
+### 4.2 Agent 角色与阶段注册
+
+`QAAgentTeam` 通过 `AgentRegistry` 将固定 LangGraph 阶段映射到唯一 Agent。当前角色边界如下：
+
+| Agent | 负责阶段 | 当前状态 |
+| --- | --- | --- |
+| `dialogue` | `normalize`、`rewrite_question` | 上下文相关追问通过角色对象调用改写模型，并提供历史降级 |
+| `intent` | `prelink_entities`、`classify_intent` | 已知实体预匹配由确定性代码完成，未命中时通过角色对象分类 |
+| `entity` | `extract_entities`、`link_entities` | 模型候选抽取通过角色对象完成，最终链接由确定性链接器确认 |
+| `retrieval` | `plan_cypher`、`validate_cypher`、`execute_cypher` | 真实确定性规划 Agent；独立选择受控计划，Guard 和只读仓储仍由工作流下游执行 |
+| `answer` | `answer_from_graph`、`direct_answer` | 图谱回答和直接回答通过角色对象调用模型，失败时使用证据化降级 |
+| `evidence_audit` | `verify_answer`、`clarify`、`no_evidence`、`safe_fail`、`finish` | 真实确定性 Agent；核对全部本轮证据并使用证据化回退，其余阶段仍由工作流收口 |
+
+该注册表提供重复 Agent、重复阶段和未知阶段的明确错误。`RetrievalAgent` 仅接收问题、已链接实体、Schema、计划尝试状态和受限模型回退生成器，不持有 Cypher Guard 或仓储，不能自行执行查询。SSE `stage` 事件携带阶段对应的 `agent`，`plan_cypher` 阶段另外携带稳定的 `plan_kind` 和中文 `plan_label`；审核完成后另有 `audit` 事件。当前 LangGraph 仍是 16 个固定节点，不是独立 Agent 子图或动态调度系统。
+
+### 4.3 路由
 
 ```mermaid
 flowchart TD
@@ -119,8 +145,8 @@ flowchart TD
     Intent -->|是| Extract[抽取实体候选]
     Extract --> Link[精确 / fuzzy / FAISS 混合链接]
     Link -->|无匹配| Clarify[请求补充具体实体]
-    Link -->|有匹配| Plan[选择属性/关系模板或生成 Cypher]
-    Plan -->|属性或唯一关系模板| Validate[安全与语法校验]
+    Link -->|有匹配| Plan[选择属性、聚合、多条件、多跳、关系模板或生成 Cypher]
+    Plan -->|受控模板或白名单多跳| Validate[安全与结构校验]
     Plan -->|复杂问题| Text2Cypher[Schema 约束 Text2Cypher]
     Text2Cypher --> Validate
     Validate -->|通过| Execute[只读执行]
@@ -225,8 +251,12 @@ M1 使用 Python 标准库实现字符串相似度。当前 M3 扩展增加本�
 仓储层提供以下能力：
 
 - `load_entity_index()`
-- `explain(cypher, parameters)`
-- `execute_read(cypher, parameters, timeout, max_rows)`
+- `explain(plan)`
+- `execute_read(plan)`
+- `execute_attributes(attribute_plan)`
+- `execute_aggregate(aggregate_plan)`
+- `execute_multi_condition_list(multi_condition_plan)`
+- `execute_multi_hop(multi_hop_plan)`
 
 查询在 Neo4j 只读会话中执行。仓储层再次检查标签和关系白名单，不能只依赖工作流前一步。
 
@@ -242,6 +272,9 @@ M1 使用 Python 标准库实现字符串相似度。当前 M3 扩展增加本�
 - 实际返回的图记录。
 - 可引用的关系证据。
 - 可引用的属性事实。
+- 可引用的受控聚合结果。
+- 可引用的多条件结果对象。
+- 可引用的两跳路径及其逐跳关系和来源。
 
 回答遵循：
 
@@ -254,7 +287,7 @@ M1 使用 Python 标准库实现字符串相似度。当前 M3 扩展增加本�
 
 如果查询成功但无结果，返回固定语义的“当前图谱没有找到相关依据”，不调用模型猜测答案。
 
-回答生成后增加确定性支持检查：回答至少需要包含本轮一个关系对象或属性值；否则替换为基于证据的简化回答。关系多来源会合并到同一条证据中展示。
+回答生成后由 `EvidenceAuditAgent` 逐项检查回答是否覆盖本轮全部关系对象、属性值、聚合描述和路径节点；未完整覆盖或回答为空时替换为基于证据的简化回答。审核结果同时记录已核对/已匹配数量、缺失来源数和是否使用回退，并通过 API、SSE、CLI 和 Streamlit 展示。该检查是确定性文本覆盖，不宣称完成语义等价或医学事实审核。关系多来源会合并到同一条证据中展示。
 
 ## 10. 关键设计决策
 
@@ -329,7 +362,12 @@ flowchart LR
 
 - 属性事实和关系事实使用不同但可组合的受控查询模式。
 - 属性型问题不再被强制构造成不存在的图关系。
+- 明确的单跳或多条件交集计数问题使用受控 Schema 模板，不允许模型自由生成聚合。
+- “同时满足多个实体条件”的列表问题使用多个 `EXISTS` 固定模板，返回结果节点、命中关系和来源。
+- 两跳查询只允许 Schema 中存在且明确列入白名单的路径；每一跳都必须连续，并返回完整 `PathEvidence`。
 - 查询规划优先使用经过测试的模板，Text2Cypher 只作为受限回退。
+- `RetrievalAgent` 使用独立 `RetrievalPlanningInput`/`RetrievalPlanningResult` 契约，输出最多一个现有计划对象；其执行顺序固定为两跳、属性、聚合、多条件列表、关系模板和 Schema 约束回退。
+- 查询计划类型通过 API `query.plan_kind` 和 SSE `plan_cypher.plan_kind` 公开，Streamlit 只展示安全中文策略名称，不展示模型推理或未校验 Cypher。
 - 最终回答生成后增加事实与引用校验。
 - 多轮上下文支持指代消解、实体继承、话题切换、用户纠正和失败轮次隔离。
 - 图谱没有来源时明确输出“当前图谱未提供出处”。
@@ -345,10 +383,11 @@ flowchart LR
 
 仍需继续完善：
 
-- 聚合查询和更复杂的多跳查询。
+- 任意深度、任意关系组合和由模型动态规划的复杂多跳查询。
 - 更大规模、独立真实问题的属性与多轮评测集。
 - 人工或规则化的答案关键事实准确率评估。
-- 最终独立 Agent 拓扑。
+- 检索规划 Agent 的独立子图、动态调度和多 Agent 自治协作。
+- 回答审核的语义等价判断和大规模人工事实抽检。
 
 实现必须保持以下不变量：
 

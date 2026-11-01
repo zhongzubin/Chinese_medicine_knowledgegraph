@@ -224,6 +224,21 @@ def render_text(response: GraphQAResponse, show_query: bool = False) -> str:
                 f"- ({item.subject}:{item.subject_label}) "
                 f"{item.attribute_label}：{item.value}{source}"
             )
+    if response.aggregates:
+        lines.extend(["", "图谱统计："])
+        for item in response.aggregates:
+            lines.append(f"- {item.description}：{item.count}")
+    if response.paths:
+        lines.extend(["", "多跳路径："])
+        for item in response.paths:
+            source = f"（来源：{item.source}）" if item.source else ""
+            lines.append(
+                f"- ({item.root}:{item.root_label})"
+                f"-[{item.first_relationship}]->"
+                f"({item.intermediate}:{item.intermediate_label})"
+                f"-[{item.second_relationship}]->"
+                f"({item.target}:{item.target_label}){source}"
+            )
     if response.evidence:
         lines.extend(["", "图谱证据："])
         for item in response.evidence:
@@ -233,6 +248,25 @@ def render_text(response: GraphQAResponse, show_query: bool = False) -> str:
                 f"-[{item.relationship}]->"
                 f"({item.object}:{item.object_label}){source}"
             )
+    if response.verification:
+        status = (
+            "已通过证据支持校验"
+            if response.verification.status == "passed"
+            else "已回退为证据化回答"
+        )
+        lines.extend(
+            [
+                "",
+                "回答校验：",
+                (
+                    f"- {status}；覆盖 "
+                    f"{response.verification.matched_items}/"
+                    f"{response.verification.checked_items} 项，"
+                    f"缺失来源 {response.verification.missing_sources} 项"
+                ),
+                f"- {response.verification.message}",
+            ]
+        )
     if show_query and response.query:
         lines.extend(
             [

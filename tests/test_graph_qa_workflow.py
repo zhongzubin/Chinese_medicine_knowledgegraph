@@ -6,6 +6,7 @@ from typing import List, Sequence
 from graph_qa.entity_linker import EntityIndex, EntityRecord
 from graph_qa.llm import ReasonerError
 from graph_qa.models import (
+    AggregateFact,
     AttributeFact,
     ConversationTurn,
     CypherPlan,
@@ -157,6 +158,7 @@ def make_formula_index() -> EntityIndex:
         [
             EntityRecord("Formula", "四君子汤"),
             EntityRecord("Herb", "人参"),
+            EntityRecord("Herb", "白术"),
         ]
     )
 
@@ -260,12 +262,26 @@ class FakeReasoner:
 
 
 class FakeRepository:
-    def __init__(self, rows=ROWS, attribute_rows=None):
+    def __init__(
+        self,
+        rows=ROWS,
+        attribute_rows=None,
+        aggregate_count=4,
+        multi_condition_rows=None,
+        multi_hop_rows=None,
+    ):
         self.rows = rows
         self.attribute_rows = attribute_rows or []
+        self.aggregate_count = aggregate_count
+        self.multi_condition_rows = multi_condition_rows or []
+        self.multi_hop_rows = multi_hop_rows or []
         self.explain_calls = 0
         self.execute_calls = 0
         self.attribute_calls = 0
+        self.aggregate_calls = 0
+        self.aggregate_plans = []
+        self.multi_condition_calls = 0
+        self.multi_hop_calls = 0
         self.closed = False
 
     def load_entity_index(self):
@@ -292,6 +308,66 @@ class FakeRepository:
             parameters={},
             rows=list(self.attribute_rows),
             row_count=len(self.attribute_rows),
+            elapsed_ms=1,
+            limit_applied=20,
+        )
+
+    def execute_aggregate(self, plan) -> QueryResult:
+        self.aggregate_calls += 1
+        self.aggregate_plans.append(plan)
+        names = [item.name for item in plan.used_entities]
+        if plan.require_all_entities:
+            parameters = {
+                f"entity_{index}": name
+                for index, name in enumerate(names)
+            }
+            cypher = (
+                "MATCH (subject) WHERE EXISTS { MATCH (subject) } "
+                "AND EXISTS { MATCH (subject) } "
+                "RETURN count(DISTINCT subject) AS count"
+            )
+        else:
+            result = "object" if plan.direction == "outgoing" else "subject"
+            parameters = {"entity_names": names}
+            cypher = (
+                "MATCH (subject)-[relationship]->(object) "
+                f"RETURN count(DISTINCT {result}) AS count"
+            )
+        return QueryResult(
+            cypher=cypher,
+            parameters=parameters,
+            rows=[{"count": self.aggregate_count}],
+            row_count=1,
+            elapsed_ms=1,
+            limit_applied=1,
+        )
+
+    def execute_multi_condition_list(self, plan) -> QueryResult:
+        self.multi_condition_calls += 1
+        return QueryResult(
+            cypher="MATCH (subject) WHERE EXISTS { MATCH (subject) }",
+            parameters={
+                f"entity_{index}": entity.name
+                for index, entity in enumerate(plan.used_entities)
+            },
+            rows=list(self.multi_condition_rows),
+            row_count=len(self.multi_condition_rows),
+            elapsed_ms=1,
+            limit_applied=20,
+        )
+
+    def execute_multi_hop(self, plan) -> QueryResult:
+        self.multi_hop_calls += 1
+        return QueryResult(
+            cypher="MATCH (root)-[first]->(middle)-[second]->(target)",
+            parameters={
+                "entity_names": [
+                    entity.name
+                    for entity in plan.used_entities
+                ]
+            },
+            rows=list(self.multi_hop_rows),
+            row_count=len(self.multi_hop_rows),
             elapsed_ms=1,
             limit_applied=20,
         )
@@ -341,7 +417,12 @@ def test_workflow_returns_grounded_answer_query_and_evidence():
     assert response.query
     assert "HAS_EFFECT" in response.query.cypher
     assert "$entity_names" in response.query.cypher
+    assert response.query.plan_kind == "controlled_relationship"
     assert response.evidence[0].object == "发汗"
+    assert response.verification is not None
+    assert response.verification.status == "passed"
+    assert response.verification.evidence_items == 1
+    assert response.verification.missing_sources == 1
     assert "不能替代专业医疗诊断和治疗" in response.answer
     assert repository.explain_calls == 1
     assert repository.execute_calls == 1
@@ -371,6 +452,7 @@ def test_attribute_question_uses_controlled_template_and_facts():
     }
     assert all(item.source == "《中药大辞典》" for item in response.facts)
     assert response.query is not None
+    assert response.query.plan_kind == "controlled_attribute"
     assert repository.attribute_calls == 1
     assert repository.execute_calls == 0
     assert reasoner.plan_calls == 0
@@ -392,12 +474,15 @@ def test_stream_answer_emits_attribute_facts_and_verification_stage():
     events = list(engine.stream_answer("麻黄性味是什么？"))
 
     fact_event = next(event for event in events if event.event == "facts")
+    audit_event = next(event for event in events if event.event == "audit")
     stages = {
         event.data["stage"]
         for event in events
         if event.event == "stage"
     }
     assert fact_event.data["items"][0]["attribute_label"] == "性味"
+    assert audit_event.data["status"] == "passed"
+    assert audit_event.data["fact_items"] == 1
     assert "verify_answer" in stages
 
 
@@ -469,6 +554,7 @@ def test_formula_ingredient_question_uses_relationship_template():
     assert response.evidence[0].object == "人参"
     assert response.query is not None
     assert "HAS_INGREDIENT" in response.query.cypher
+    assert response.query.plan_kind == "controlled_relationship"
     assert reasoner.plan_calls == 0
     assert repository.execute_calls == 1
 
@@ -492,7 +578,192 @@ def test_reverse_formula_lookup_uses_relationship_template():
     assert response.grounded is True
     assert response.query is not None
     assert "object.name IN $entity_names" in response.query.cypher
+    assert response.query.plan_kind == "controlled_relationship"
     assert reasoner.plan_calls == 0
+
+
+def test_formula_ingredient_count_uses_aggregate_template():
+    reasoner = FakeReasoner(intent=tcm_intent())
+    repository = FakeRepository(aggregate_count=4)
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_formula_index(),
+    )
+
+    response = engine.answer("四君子汤由多少味药材组成？")
+
+    assert response.error is None
+    assert response.grounded is True
+    assert response.aggregates == [
+        AggregateFact(
+            anchor="四君子汤",
+            anchor_label="Formula",
+            relationship="HAS_INGREDIENT",
+            result_label="Herb",
+            direction="outgoing",
+            count=4,
+            description="四君子汤关联的药材",
+        )
+    ]
+    assert "4 个" in response.answer
+    assert reasoner.plan_calls == 0
+    assert reasoner.answer_calls == 0
+    assert repository.aggregate_calls == 1
+
+
+def test_reverse_aggregate_counts_formulas_containing_herb():
+    reasoner = FakeReasoner(intent=tcm_intent())
+    repository = FakeRepository(aggregate_count=7)
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_formula_index(),
+    )
+
+    response = engine.answer("含有人参的方剂有多少种？")
+
+    assert response.grounded is True
+    assert response.aggregates[0].direction == "incoming"
+    assert response.aggregates[0].result_label == "Formula"
+    assert response.aggregates[0].count == 7
+    assert response.query is not None
+    assert "count(DISTINCT subject)" in response.query.cypher
+    assert response.query.plan_kind == "controlled_aggregate"
+    assert reasoner.plan_calls == 0
+
+
+def test_multi_condition_aggregate_requires_both_herbs():
+    reasoner = FakeReasoner(intent=tcm_intent())
+    repository = FakeRepository(aggregate_count=7)
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_formula_index(),
+    )
+
+    response = engine.answer("同时含有人参和白术的方剂有多少种？")
+
+    assert response.grounded is True
+    assert response.aggregates[0].count == 7
+    assert response.aggregates[0].description == "同时关联到人参、白术的方剂"
+    assert response.query.plan_kind == "controlled_aggregate"
+    assert repository.aggregate_plans[0].require_all_entities is True
+    assert reasoner.plan_calls == 0
+
+
+def test_multi_condition_list_returns_matching_formulas_and_evidence():
+    reasoner = FakeReasoner(intent=tcm_intent())
+    repository = FakeRepository(
+        multi_condition_rows=[
+            {
+                "subject": "四君子汤",
+                "subject_label": "Formula",
+                "conditions": [
+                    {
+                        "relationship": "HAS_INGREDIENT",
+                        "object": "人参",
+                        "object_label": "Herb",
+                        "sources": [],
+                    },
+                    {
+                        "relationship": "HAS_INGREDIENT",
+                        "object": "白术",
+                        "object_label": "Herb",
+                        "sources": [],
+                    },
+                ],
+            }
+        ]
+    )
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_formula_index(),
+    )
+
+    response = engine.answer("同时含有人参和白术的方剂有哪些？")
+
+    assert response.grounded is True
+    assert response.query.plan_kind == "controlled_multi_condition_list"
+    assert response.answer.startswith(
+        "根据当前图谱，同时关联到人参、白术的方剂如下："
+    )
+    assert "四君子汤" in response.answer
+    assert {(item.object) for item in response.evidence} == {
+        "人参",
+        "白术",
+    }
+    assert repository.multi_condition_calls == 1
+    assert reasoner.plan_calls == 0
+    assert reasoner.answer_calls == 0
+
+
+def test_multi_hop_question_returns_paths_and_deterministic_answer():
+    reasoner = FakeReasoner(intent=tcm_intent())
+    repository = FakeRepository(
+        multi_hop_rows=[
+            {
+                "root": "四君子汤",
+                "root_label": "Formula",
+                "first_relationship": "HAS_INGREDIENT",
+                "intermediate": "人参",
+                "intermediate_label": "Herb",
+                "second_relationship": "HAS_EFFECT",
+                "target": "补气",
+                "target_label": "Effect",
+                "sources": [],
+            }
+        ]
+    )
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_formula_index(),
+    )
+
+    response = engine.answer("四君子汤所含药材有什么功效？")
+
+    assert response.grounded is True
+    assert response.error is None
+    assert response.query.plan_kind == "controlled_multi_hop"
+    assert len(response.paths) == 1
+    assert response.paths[0].intermediate == "人参"
+    assert response.paths[0].target == "补气"
+    assert response.verification is not None
+    assert response.verification.path_items == 1
+    assert response.verification.status == "passed"
+    assert "人参：补气" in response.answer
+    assert repository.multi_hop_calls == 1
+    assert reasoner.plan_calls == 0
+    assert reasoner.answer_calls == 0
+
+
+def test_stream_answer_emits_aggregate_event_and_count():
+    engine = GraphQAEngine(
+        reasoner=FakeReasoner(intent=tcm_intent()),
+        repository=FakeRepository(aggregate_count=4),
+        schema=make_schema(),
+        entity_index=make_formula_index(),
+    )
+
+    events = list(engine.stream_answer("四君子汤由多少味药材组成？"))
+
+    aggregate_event = next(
+        event for event in events if event.event == "aggregates"
+    )
+    answer_text = "".join(
+        event.data["delta"]
+        for event in events
+        if event.event == "answer_delta"
+    )
+    assert aggregate_event.data["items"][0]["count"] == 4
+    assert "4 个" in answer_text
 
 
 def test_entity_source_question_uses_forward_relationship_direction():
@@ -652,6 +923,35 @@ def test_rewrite_failure_uses_recent_entity_and_pronoun():
     assert update["warnings"]
 
 
+def test_pronoun_after_entity_clarification_requires_new_context():
+    reasoner = FakeReasoner(intent=tcm_intent(), rewritten_question="麻黄归经是什么？")
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=FakeRepository(),
+        schema=make_schema(),
+        entity_index=make_index(),
+    )
+    history = [
+        ConversationTurn(
+            question="星辰草有什么功效？",
+            answer="请补充具体实体。",
+            linked_entities=[],
+            grounded=False,
+        )
+    ]
+
+    update = engine._rewrite_question(
+        {
+            "normalized_question": "它归经是什么？",
+            "conversation_history": history,
+        }
+    )
+
+    assert update["rewritten_question"] == "它归经是什么？"
+    assert update["warnings"]
+    assert reasoner.rewrite_calls == []
+
+
 def test_stream_answer_emits_public_stages_progress_and_answer_deltas():
     reasoner = FakeReasoner(
         intent=tcm_intent(),
@@ -678,6 +978,15 @@ def test_stream_answer_emits_public_stages_progress_and_answer_deltas():
         if event.event == "answer_delta"
     )
     done = next(event for event in events if event.event == "done")
+    audit = next(event for event in events if event.event == "audit")
+    plan_stages = [
+        event.data
+        for event in events
+        if (
+            event.event == "stage"
+            and event.data.get("stage") == "plan_cypher"
+        )
+    ]
 
     assert {
         "normalize",
@@ -688,6 +997,23 @@ def test_stream_answer_emits_public_stages_progress_and_answer_deltas():
     }.issubset(stage_names)
     assert answer_text == done.data["response"]["answer"]
     assert done.data["response"]["grounded"] is True
+    assert done.data["response"]["verification"]["status"] == "passed"
+    assert audit.data["agent"] == "evidence_audit"
+    assert [
+        item["plan_kind"]
+        for item in plan_stages
+    ] == [
+        "controlled_attribute",
+        "controlled_relationship",
+    ]
+    assert [
+        item["plan_label"]
+        for item in plan_stages
+    ] == ["图谱属性", "受控关系"]
+    assert all(
+        "cypher" not in item and "parameters" not in item
+        for item in plan_stages
+    )
 
 
 def test_unsupported_answer_is_replaced_by_evidence_fallback():
@@ -717,6 +1043,8 @@ def test_unsupported_answer_is_replaced_by_evidence_fallback():
     assert "发汗" in update["answer"]
     assert update["grounded"] is True
     assert update["warnings"]
+    assert update["verification"].status == "fallback"
+    assert update["verification"].fallback_used is True
 
 
 def test_answer_formatting_splits_inline_markdown_bullets():
@@ -761,6 +1089,7 @@ def test_non_tcm_question_uses_direct_answer_without_graph_query():
     assert response.grounded is False
     assert response.query is None
     assert response.linked_entities == []
+    assert response.verification is None
     assert any("未使用知识图谱证据" in warning for warning in response.warnings)
     assert "不能替代专业医疗诊断和治疗" not in response.answer
     assert repository.execute_calls == 0

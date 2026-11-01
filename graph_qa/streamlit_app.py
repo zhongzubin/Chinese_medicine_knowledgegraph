@@ -38,6 +38,18 @@ def _answer_markdown(answer: str) -> str:
     return answer or "正在生成回答…"
 
 
+def _stage_display_label(event_data: dict) -> Optional[str]:
+    stage_label = event_data.get("label")
+    plan_label = event_data.get("plan_label")
+    if (
+        event_data.get("stage") == "plan_cypher"
+        and stage_label
+        and plan_label
+    ):
+        return f"{stage_label}（{plan_label}）"
+    return stage_label
+
+
 def main() -> None:
     st.set_page_config(
         page_title="中医知识图谱问答",
@@ -92,6 +104,9 @@ def main() -> None:
     answer = ""
     evidence = []
     facts = []
+    aggregates = []
+    paths = []
+    verification = None
     warnings = []
     progress_labels = []
     answer_placeholder.markdown(_answer_markdown(answer))
@@ -125,9 +140,9 @@ def main() -> None:
                 response.iter_lines(decode_unicode=True)
             ):
                 if event_name == "stage":
-                    stage_label = event_data.get("label")
-                    if stage_label and stage_label not in progress_labels:
-                        progress_labels.append(stage_label)
+                    display_label = _stage_display_label(event_data)
+                    if display_label and display_label not in progress_labels:
+                        progress_labels.append(display_label)
                         progress_placeholder.markdown(
                             "\n".join(
                                 f"- {item}" for item in progress_labels
@@ -140,6 +155,12 @@ def main() -> None:
                     evidence = event_data.get("items", [])
                 elif event_name == "facts":
                     facts = event_data.get("items", [])
+                elif event_name == "aggregates":
+                    aggregates = event_data.get("items", [])
+                elif event_name == "paths":
+                    paths = event_data.get("items", [])
+                elif event_name == "audit":
+                    verification = event_data
                 elif event_name == "warning":
                     message = event_data.get("message")
                     if message:
@@ -157,6 +178,8 @@ def main() -> None:
                     if final_answer:
                         answer = final_answer
                         answer_placeholder.markdown(final_answer)
+                    if done_response.get("verification"):
+                        verification = done_response["verification"]
     except (requests.RequestException, RuntimeError) as exc:
         answer_placeholder.error(str(exc))
         return
@@ -165,6 +188,38 @@ def main() -> None:
     if warnings:
         for warning in warnings:
             st.warning(warning)
+    if verification:
+        with st.expander("回答校验"):
+            if verification.get("status") == "passed":
+                st.success(verification.get("message", "回答已通过证据支持校验。"))
+            else:
+                st.warning(
+                    verification.get(
+                        "message",
+                        "回答未通过证据支持校验，已回退为证据化回答。",
+                    )
+                )
+            st.caption(
+                "审核 Agent："
+                f"{verification.get('agent', 'evidence_audit')}；"
+                f"覆盖 {verification.get('matched_items', 0)}/"
+                f"{verification.get('checked_items', 0)} 项证据"
+            )
+            counts = []
+            for key, label in (
+                ("evidence_items", "关系"),
+                ("fact_items", "属性"),
+                ("aggregate_items", "统计"),
+                ("path_items", "路径"),
+            ):
+                count = verification.get(key, 0)
+                if count:
+                    counts.append(f"{label} {count}")
+            if counts:
+                st.markdown("；".join(counts))
+            missing_sources = verification.get("missing_sources", 0)
+            if missing_sources:
+                st.caption(f"其中 {missing_sources} 项未提供图谱出处。")
     if evidence:
         with st.expander("图谱证据"):
             for item in evidence:
@@ -185,6 +240,23 @@ def main() -> None:
                 st.markdown(
                     f"- `{item['subject']}:{item['subject_label']}` "
                     f"{item['attribute_label']}：{item['value']}{source}"
+                )
+    if aggregates:
+        with st.expander("图谱统计"):
+            for item in aggregates:
+                st.markdown(
+                    f"- {item['description']}共有 {item['count']} 个"
+                )
+    if paths:
+        with st.expander("多跳证据"):
+            for item in paths:
+                source = f"（来源：{item['source']}）" if item.get("source") else ""
+                st.markdown(
+                    f"- `{item['root']}:{item['root_label']}` "
+                    f"-[{item['first_relationship']}]-> "
+                    f"`{item['intermediate']}:{item['intermediate_label']}` "
+                    f"-[{item['second_relationship']}]-> "
+                    f"`{item['target']}:{item['target_label']}`{source}"
                 )
     if st.session_state.session_id:
         st.caption(f"会话：{st.session_state.session_id}")

@@ -11,11 +11,14 @@ from fastapi.testclient import TestClient
 from graph_qa.api import create_app
 from graph_qa.api_security import APIConfigurationError, APISettings
 from graph_qa.models import (
+    AggregateFact,
+    AnswerVerification,
     AttributeFact,
     ConversationTurn,
     ErrorCode,
     Evidence,
     GraphQAResponse,
+    PathEvidence,
     QueryInfo,
 )
 from graph_qa.redis_limits import (
@@ -319,6 +322,141 @@ def test_qa_serializes_attribute_facts():
 
     assert response.status_code == 200
     assert response.json()["facts"][0]["attribute_label"] == "性味"
+
+
+def test_qa_serializes_aggregate_facts():
+    engine = FakeEngine(
+        response=GraphQAResponse(
+            question="含有人参的方剂有多少种？",
+            answer="根据当前图谱统计，关联到人参的方剂共有 7 个。",
+            grounded=True,
+            aggregates=[
+                AggregateFact(
+                    anchor="人参",
+                    anchor_label="Herb",
+                    relationship="HAS_INGREDIENT",
+                    result_label="Formula",
+                    direction="incoming",
+                    count=7,
+                    description="关联到人参的方剂",
+                )
+            ],
+        )
+    )
+    store = FakeLimitStore()
+
+    with TestClient(make_app(engine, store)) as client:
+        response = client.post(
+            "/api/v1/qa",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={"question": "含有人参的方剂有多少种？"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["aggregates"][0]["count"] == 7
+
+
+def test_qa_serializes_multi_hop_paths():
+    engine = FakeEngine(
+        response=GraphQAResponse(
+            question="四君子汤所含药材有什么功效？",
+            answer="四君子汤所含人参具有补气功效。",
+            grounded=True,
+            paths=[
+                PathEvidence(
+                    root="四君子汤",
+                    root_label="Formula",
+                    first_relationship="HAS_INGREDIENT",
+                    intermediate="人参",
+                    intermediate_label="Herb",
+                    second_relationship="HAS_EFFECT",
+                    target="补气",
+                    target_label="Effect",
+                )
+            ],
+        )
+    )
+    store = FakeLimitStore()
+
+    with TestClient(make_app(engine, store)) as client:
+        response = client.post(
+            "/api/v1/qa",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={"question": "四君子汤所含药材有什么功效？"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["paths"][0]["intermediate"] == "人参"
+
+
+def test_qa_serializes_answer_verification():
+    engine = FakeEngine(
+        response=GraphQAResponse(
+            question="麻黄有什么功效？",
+            answer="麻黄具有发汗功效。",
+            grounded=True,
+            verification=AnswerVerification(
+                status="passed",
+                checked_items=1,
+                matched_items=1,
+                evidence_items=1,
+                fact_items=0,
+                aggregate_items=0,
+                path_items=0,
+                missing_sources=0,
+                fallback_used=False,
+                message="已核对 1 项图谱证据，回答包含可追溯事实。",
+            ),
+        )
+    )
+
+    with TestClient(make_app(engine, FakeLimitStore())) as client:
+        response = client.post(
+            "/api/v1/qa",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={"question": "麻黄有什么功效？"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["verification"]["status"] == "passed"
+    assert response.json()["verification"]["checked_items"] == 1
+
+
+def test_qa_serializes_retrieval_plan_kind():
+    engine = FakeEngine(
+        response=GraphQAResponse(
+            question="四君子汤所含药材有什么功效？",
+            answer="四君子汤所含人参具有补气功效。",
+            grounded=True,
+            query=QueryInfo(
+                cypher="MATCH ... RETURN ... LIMIT 20",
+                parameters={"entity_names": ["四君子汤"]},
+                plan_kind="controlled_multi_hop",
+            ),
+            paths=[
+                PathEvidence(
+                    root="四君子汤",
+                    root_label="Formula",
+                    first_relationship="HAS_INGREDIENT",
+                    intermediate="人参",
+                    intermediate_label="Herb",
+                    second_relationship="HAS_EFFECT",
+                    target="补气",
+                    target_label="Effect",
+                )
+            ],
+        )
+    )
+
+    with TestClient(make_app(engine, FakeLimitStore())) as client:
+        response = client.post(
+            "/api/v1/qa",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={"question": "四君子汤所含药材有什么功效？"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["query"]["plan_kind"] == "controlled_multi_hop"
 
 
 def test_missing_or_wrong_api_key_returns_same_unauthorized_response():
