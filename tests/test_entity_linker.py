@@ -145,6 +145,83 @@ def test_generic_entity_candidate_does_not_trigger_semantic_match():
     assert semantic.calls == []
 
 
+def test_unknown_named_herb_is_not_accepted_from_semantic_only_match():
+    class NamedHerbSemanticMatcher:
+        def match(self, text):
+            return [
+                LinkedEntity(
+                    label="Herb",
+                    name="梦花根",
+                    matched_text=text,
+                    match_type="semantic",
+                    score=0.5823,
+                )
+            ]
+
+    index = EntityIndex.from_records(
+        [EntityRecord("Herb", "梦花根")],
+        semantic_index=NamedHerbSemanticMatcher(),
+    )
+
+    linked = index.match(
+        [EntityCandidate(text="云梦根", suggested_label="Herb")],
+        "云梦根有什么功效？",
+    )
+
+    assert linked == []
+
+
+def test_named_question_does_not_fall_back_to_semantic_herb_match():
+    class NamedHerbSemanticMatcher:
+        def match(self, text):
+            return [
+                LinkedEntity(
+                    label="Herb",
+                    name="白鹤藤",
+                    matched_text=text,
+                    match_type="semantic",
+                    score=0.5642,
+                )
+            ]
+
+    index = EntityIndex.from_records(
+        [EntityRecord("Herb", "白鹤藤")],
+        semantic_index=NamedHerbSemanticMatcher(),
+    )
+
+    linked = index.match([], "白羽藤有什么功效？")
+
+    assert linked == []
+
+
+def test_descriptive_phrase_still_uses_semantic_effect_match():
+    class EffectSemanticMatcher:
+        def match(self, text):
+            return [
+                LinkedEntity(
+                    label="Effect",
+                    name="清热解毒",
+                    matched_text=text,
+                    match_type="semantic",
+                    score=0.68,
+                )
+            ]
+
+    index = EntityIndex.from_records(
+        [EntityRecord("Effect", "清热解毒")],
+        semantic_index=EffectSemanticMatcher(),
+    )
+
+    linked = index.match(
+        [EntityCandidate(text="清除体内热毒", suggested_label="Effect")],
+        "哪些方剂能清除体内热毒？",
+    )
+
+    assert [(item.label, item.name) for item in linked] == [
+        ("Effect", "清热解毒")
+    ]
+
+
 def test_fuzzy_match_keeps_supported_entity_suffix_variant():
     index = EntityIndex.from_records([EntityRecord("Herb", "麻黄")])
 

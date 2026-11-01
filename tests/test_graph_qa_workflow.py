@@ -3,6 +3,8 @@
 
 from typing import List, Sequence
 
+import pytest
+
 from graph_qa.entity_linker import EntityIndex, EntityRecord
 from graph_qa.llm import ReasonerError
 from graph_qa.models import (
@@ -193,6 +195,7 @@ class FakeReasoner:
         self.rewritten_question = rewritten_question
         self.plan_calls = 0
         self.direct_calls = 0
+        self.intent_calls = 0
         self.answer_calls = 0
         self.rewrite_calls = []
 
@@ -203,6 +206,7 @@ class FakeReasoner:
         )
 
     def classify_intent(self, question: str) -> IntentResult:
+        self.intent_calls += 1
         return self.intent
 
     def extract_entities(self, question: str) -> List[EntityCandidate]:
@@ -529,6 +533,9 @@ def test_missing_non_relation_attribute_returns_no_evidence():
     assert response.grounded is False
     assert response.facts == []
     assert "没有找到" in response.answer
+    assert response.warnings == [
+        "已识别实体，但本轮没有找到可验证的图谱证据。"
+    ]
     assert repository.attribute_calls == 1
     assert repository.execute_calls == 0
     assert reasoner.plan_calls == 0
@@ -1139,6 +1146,38 @@ def test_prelink_uses_exact_matches_only():
     assert update["prelinked_entities"] == []
 
 
+def test_unresolved_pronoun_does_not_enter_semantic_entity_linking():
+    class FailingSemanticMatcher:
+        def match(self, text):
+            raise AssertionError(f"未解析代词不应调用语义匹配: {text}")
+
+    entity_index = EntityIndex.from_records(
+        [EntityRecord("Herb", "麻黄")],
+        semantic_index=FailingSemanticMatcher(),
+    )
+    engine = GraphQAEngine(
+        reasoner=FakeReasoner(intent=tcm_intent()),
+        repository=FakeRepository(),
+        schema=make_schema(),
+        entity_index=entity_index,
+    )
+
+    update = engine._link_entities(
+        {
+            "normalized_question": "它归经是什么？",
+            "prelinked_entities": [],
+            "entity_candidates": [
+                EntityCandidate(text="它归经是什么", suggested_label="Source")
+            ],
+        }
+    )
+
+    assert update["linked_entities"] == []
+    assert update["warnings"] == [
+        "指代对象仍未确认，本轮未执行实体语义匹配。"
+    ]
+
+
 def test_generic_model_candidate_requests_clarification_without_query():
     reasoner = FakeReasoner(
         intent=tcm_intent(),
@@ -1181,6 +1220,36 @@ def test_tcm_question_without_linked_entity_requests_clarification():
     assert response.error is None
     assert "请补充" in response.answer
     assert reasoner.plan_calls == 0
+
+
+@pytest.mark.parametrize("entity_name", ["冰魄花", "雾隐芝"])
+def test_unknown_entity_shaped_tcm_question_skips_model_intent_and_clarifies(
+    entity_name,
+):
+    reasoner = FakeReasoner(
+        intent=non_tcm_intent(),
+        candidates=[EntityCandidate(text=entity_name, suggested_label="Herb")],
+    )
+    repository = FakeRepository()
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_index(),
+    )
+
+    response = engine.answer(f"{entity_name}有什么功效？")
+
+    assert response.intent is not None
+    assert response.intent.is_tcm_question is True
+    assert response.intent.reason_code == "TCM_QUERY_PATTERN"
+    assert response.grounded is False
+    assert response.linked_entities == []
+    assert "补充或确认" in response.answer
+    assert response.warnings == ["未确认具体实体，本轮未执行图谱查询。"]
+    assert reasoner.intent_calls == 0
+    assert reasoner.direct_calls == 0
+    assert repository.execute_calls == 0
 
 
 def test_unsafe_request_is_rejected_before_model_calls():

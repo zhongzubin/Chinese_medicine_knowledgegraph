@@ -137,6 +137,15 @@ def requested_attributes(question: str) -> List[str]:
     return requested
 
 
+def has_tcm_query_cue(question: str) -> bool:
+    """识别明确的属性、关系或实体范围问法。"""
+    return bool(
+        requested_attributes(question)
+        or _requested_relations(question)
+        or _entity_hints(question)
+    )
+
+
 def _requested_relations(question: str) -> Set[str]:
     return {
         relation

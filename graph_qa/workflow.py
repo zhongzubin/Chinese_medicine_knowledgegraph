@@ -18,10 +18,11 @@ from graph_qa.agents.evidence_audit import (
 )
 from graph_qa.agents.retrieval import (
     RETRIEVAL_PLAN_LABELS,
+    has_tcm_query_cue,
     requested_attributes,
 )
 from graph_qa.cypher_guard import CypherGuard, CypherGuardError, detect_unsafe_question
-from graph_qa.entity_linker import EntityIndex
+from graph_qa.entity_linker import EntityIndex, question_mentions_named_entity
 from graph_qa.llm import QAReasoner, ReasonerError
 from graph_qa.models import (
     AggregateFact,
@@ -46,10 +47,12 @@ from graph_qa.state import AgentState
 
 WHITESPACE_RE = re.compile(r"\s+")
 
-NO_EVIDENCE_ANSWER = "当前图谱没有找到足以回答该问题的依据。"
+NO_EVIDENCE_ANSWER = (
+    "已识别到相关图谱实体，但当前图谱没有找到足以回答该问题的依据。"
+)
 CLARIFY_ANSWER = (
-    "我暂时没有在知识图谱中匹配到具体实体。"
-    "请补充药材、方剂、疾病、症状、功效或文献名称后再试。"
+    "当前图谱未识别出具体实体，不能据此生成医疗事实。"
+    "请补充或确认药材、方剂、疾病、症状、功效或文献名称后再试。"
 )
 SAFE_RETRY_ANSWER = "未能生成符合只读安全规则的图谱查询，请换一种更具体的问法。"
 
@@ -655,8 +658,22 @@ class GraphQAEngine:
                 ),
                 "stage_events": ["classify_intent"],
             }
+        question = _active_question(state)
+        if (
+            question_mentions_named_entity(question)
+            and has_tcm_query_cue(question)
+        ):
+            return {
+                "intent": IntentResult(
+                    is_tcm_question=True,
+                    confidence=0.80,
+                    matched_domain_terms=[],
+                    reason_code="TCM_QUERY_PATTERN",
+                ),
+                "stage_events": ["classify_intent"],
+            }
         try:
-            intent = self.agents.intent.classify(_active_question(state))
+            intent = self.agents.intent.classify(question)
             return {"intent": intent, "stage_events": ["classify_intent"]}
         except ReasonerError as exc:
             return self._terminal_error(
@@ -705,11 +722,26 @@ class GraphQAEngine:
             )
 
     def _link_entities(self, state: AgentState) -> Dict[str, Any]:
+        active_question = _active_question(state)
+        if (
+            not state.get("prelinked_entities")
+            and any(
+                pronoun in active_question
+                for pronoun in CONTEXT_PRONOUNS
+            )
+        ):
+            return {
+                "linked_entities": [],
+                "warnings": [
+                    "指代对象仍未确认，本轮未执行实体语义匹配。"
+                ],
+                "stage_events": ["link_entities"],
+            }
         candidate_linked = []
         if state.get("entity_candidates"):
             candidate_linked = self.entity_index.match(
                 state["entity_candidates"],
-                _active_question(state),
+                active_question,
                 limit_per_label=self.entity_limit,
             )
         best_by_key = {
@@ -1532,7 +1564,7 @@ class GraphQAEngine:
         return {
             "answer": answer,
             "grounded": False,
-            "warnings": ["未找到可以用于图谱查询的具体实体。"],
+            "warnings": ["未确认具体实体，本轮未执行图谱查询。"],
             "stage_events": ["clarify"],
         }
 
@@ -1542,7 +1574,7 @@ class GraphQAEngine:
         return {
             "answer": answer,
             "grounded": False,
-            "warnings": ["图谱查询没有返回记录。"],
+            "warnings": ["已识别实体，但本轮没有找到可验证的图谱证据。"],
             "stage_events": ["no_evidence"],
         }
 
