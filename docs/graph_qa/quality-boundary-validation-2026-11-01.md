@@ -58,7 +58,7 @@ uv run --no-cache python -m pytest tests/ -v
 
 结果：
 
-- `221 passed`
+- `227 passed`
 - `5 skipped`
 - `3 warnings`
 
@@ -97,6 +97,8 @@ uv run --no-cache python -m graph_qa.evaluate `
 | P50 / P95 | 36 ms / 9,586 ms | 无 |
 
 `acceptance.passed=true`。结果对象和路径匹配为 100%，答案包含为 100%。剩余 semantic 路径差异属于模型候选和 fuzzy/semantic 路径选择差异，没有造成 outcome 失败或错误 grounded。
+
+后续检索 Agent 闭环改造没有按用户要求在 200 条和 62 轮真实集上重复消耗模型调用；闭环路由、回退、终止和页面标签由相关单元测试及全量自动化测试覆盖。
 
 ## 5. 120 条回归
 
