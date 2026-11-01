@@ -1,6 +1,6 @@
 # 可验证知识图谱问答架构
 
-> 文档状态：当前实现基线 v1.1
+> 文档状态：当前实现基线 v1.2
 >
 > 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit、查询扩展与 Agent 基础层
 > 最后更新：2026-11-01
@@ -63,6 +63,7 @@ flowchart TB
 | `state.py` | LangGraph 状态定义和初始化 | 持久化会话 |
 | `prompts.py` | 意图、实体抽取、Cypher 生成和回答提示词 | 读取数据库 |
 | `agents/` | Agent 描述、唯一注册表、角色对象和阶段映射 | 改变 Cypher 安全边界或替代确定性查询 |
+| `agents/retrieval.py` | 基于已链接实体和 Schema 选择受控查询计划 | 校验或执行任意 Cypher、访问图数据库 |
 | `agents/evidence_audit.py` | 逐项证据覆盖、缺失来源统计和证据化回退 | 自由判断医学事实或放宽证据边界 |
 | `entity_linker.py` | 名称规范化、别名索引、候选匹配 | 自行生成实体名称 |
 | `cypher_guard.py` | 单语句、只读、元数据白名单、LIMIT 和参数检查 | 执行查询 |
@@ -99,6 +100,7 @@ flowchart TB
 | `multi_condition_plan` | 同时满足多个实体条件的结果列表计划 |
 | `multi_hop_plan` | 仅包含两个步骤的白名单路径计划 |
 | `cypher_plan` | Text2Cypher 候选查询和参数 |
+| `retrieval_plan_kind` | 本轮最终选中的受控查询策略，用于响应和公开阶段展示 |
 | `validation_errors` | 安全或语法校验问题 |
 | `query_attempts` | 已生成查询的次数 |
 | `query_result` | 实际返回的受控查询结果 |
@@ -123,11 +125,11 @@ flowchart TB
 | `dialogue` | `normalize`、`rewrite_question` | 上下文相关追问通过角色对象调用改写模型，并提供历史降级 |
 | `intent` | `prelink_entities`、`classify_intent` | 已知实体预匹配由确定性代码完成，未命中时通过角色对象分类 |
 | `entity` | `extract_entities`、`link_entities` | 模型候选抽取通过角色对象完成，最终链接由确定性链接器确认 |
-| `retrieval` | `plan_cypher`、`validate_cypher`、`execute_cypher` | 声明式职责边界；当前查询计划、Guard 和仓储执行仍由工作流确定性代码完成 |
+| `retrieval` | `plan_cypher`、`validate_cypher`、`execute_cypher` | 真实确定性规划 Agent；独立选择受控计划，Guard 和只读仓储仍由工作流下游执行 |
 | `answer` | `answer_from_graph`、`direct_answer` | 图谱回答和直接回答通过角色对象调用模型，失败时使用证据化降级 |
 | `evidence_audit` | `verify_answer`、`clarify`、`no_evidence`、`safe_fail`、`finish` | 真实确定性 Agent；核对全部本轮证据并使用证据化回退，其余阶段仍由工作流收口 |
 
-该注册表提供重复 Agent、重复阶段和未知阶段的明确错误。SSE `stage` 事件携带阶段对应的 `agent`，审核完成后另有 `audit` 事件。当前 LangGraph 仍是 16 个固定节点，不是独立 Agent 子图或动态调度系统。
+该注册表提供重复 Agent、重复阶段和未知阶段的明确错误。`RetrievalAgent` 仅接收问题、已链接实体、Schema、计划尝试状态和受限模型回退生成器，不持有 Cypher Guard 或仓储，不能自行执行查询。SSE `stage` 事件携带阶段对应的 `agent`，`plan_cypher` 阶段另外携带稳定的 `plan_kind` 和中文 `plan_label`；审核完成后另有 `audit` 事件。当前 LangGraph 仍是 16 个固定节点，不是独立 Agent 子图或动态调度系统。
 
 ### 4.3 路由
 
@@ -364,6 +366,8 @@ flowchart LR
 - “同时满足多个实体条件”的列表问题使用多个 `EXISTS` 固定模板，返回结果节点、命中关系和来源。
 - 两跳查询只允许 Schema 中存在且明确列入白名单的路径；每一跳都必须连续，并返回完整 `PathEvidence`。
 - 查询规划优先使用经过测试的模板，Text2Cypher 只作为受限回退。
+- `RetrievalAgent` 使用独立 `RetrievalPlanningInput`/`RetrievalPlanningResult` 契约，输出最多一个现有计划对象；其执行顺序固定为两跳、属性、聚合、多条件列表、关系模板和 Schema 约束回退。
+- 查询计划类型通过 API `query.plan_kind` 和 SSE `plan_cypher.plan_kind` 公开，Streamlit 只展示安全中文策略名称，不展示模型推理或未校验 Cypher。
 - 最终回答生成后增加事实与引用校验。
 - 多轮上下文支持指代消解、实体继承、话题切换、用户纠正和失败轮次隔离。
 - 图谱没有来源时明确输出“当前图谱未提供出处”。
@@ -382,7 +386,7 @@ flowchart LR
 - 任意深度、任意关系组合和由模型动态规划的复杂多跳查询。
 - 更大规模、独立真实问题的属性与多轮评测集。
 - 人工或规则化的答案关键事实准确率评估。
-- 检索规划 Agent 的独立输入输出契约、拓扑和动态调度。
+- 检索规划 Agent 的独立子图、动态调度和多 Agent 自治协作。
 - 回答审核的语义等价判断和大规模人工事实抽检。
 
 实现必须保持以下不变量：

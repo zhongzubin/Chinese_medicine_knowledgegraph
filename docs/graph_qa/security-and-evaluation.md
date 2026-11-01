@@ -1,6 +1,6 @@
 # 知识图谱问答安全与评测规范
 
-> 文档状态：当前实现基线 v1.1
+> 文档状态：当前实现基线 v1.2
 >
 > 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit、查询扩展与 Agent 基础层
 > 最后更新：2026-11-01
@@ -219,6 +219,8 @@
 - Cypher 合法用例和全部恶意用例。
 - 参数类型和元数据白名单。
 - LangGraph 路由和三次尝试上限。
+- 检索规划 Agent 的固定计划优先级、单计划输出约束、实体参数边界和模型错误收口。
+- 检索规划 Agent 不持有 Guard 或仓储，不能执行查询。
 - 空查询结果和模型格式错误。
 - 证据转换和 JSON 序列化。
 
@@ -280,7 +282,7 @@
 
 ## 9. 专业问答质量 v1 验收计划
 
-> 状态：查询扩展、Agent 基础层和证据审核 Agent 已完成首轮落地，产品集持续扩充
+> 状态：查询扩展、检索规划 Agent、证据审核 Agent 和用户可见校验已完成首轮落地，产品集持续扩充
 >
 > 规划与验收记录：
 > [product-quality-roadmap.md](product-quality-roadmap.md)、
@@ -374,4 +376,6 @@
 - 模型隐藏推理不进入前端或公开响应。
 - 无证据时不得生成看似确定的中医药事实。
 
-Agent 角色化不得削弱安全边界。`retrieval` 成为独立 Agent 时，仍只能调用受控查询计划、Cypher Guard 和只读仓储；`evidence_audit` 必须继续使用确定性覆盖检查，不能改成仅由模型自由评分。阶段注册与 SSE 中的 Agent 名称不构成对模型自治查询的授权。
+Agent 角色化不得削弱安全边界。`RetrievalAgent` 只输出现有受控计划或 Schema 约束回退，不持有 Cypher Guard 和仓储；校验与只读执行仍由工作流下游完成。`evidence_audit` 必须继续使用确定性覆盖检查，不能改成仅由模型自由评分。阶段注册、`plan_kind` 展示与 SSE 中的 Agent 名称均不构成对模型自治查询的授权。
+
+最终验证记录见 [retrieval-agent-validation-2026-11-01.md](retrieval-agent-validation-2026-11-01.md)。

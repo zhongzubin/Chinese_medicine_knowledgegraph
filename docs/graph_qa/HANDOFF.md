@@ -1,6 +1,6 @@
 # 知识图谱问答交接说明
 
-> 代码基线：`b0dc5d2`
+> 代码基线：`80ddc7b`
 >
 > 交接日期：2026-11-01
 >
@@ -28,7 +28,7 @@
 | 本地演示版 | 已完成；一键启动/停止和真实浏览器验收通过 |
 | 专业问答质量 v1 | 首轮已完成；属性、确定性查询、多轮和答案支持校验通过 |
 | 查询覆盖扩展 | 已完成首轮；多条件结果列表和四种 Schema 白名单两跳 |
-| Agent 基础层 | 已启动；角色注册、固定阶段映射和证据审核 Agent 已接入 |
+| Agent 基础层 | 已启动；角色注册、固定阶段映射、检索规划 Agent 和证据审核 Agent 已接入 |
 | M5 微调/部署增强 | 未开始 |
 
 明确不在当前范围：
@@ -65,9 +65,11 @@ Agent 基础层目前是固定 LangGraph 拓扑上的职责注册，不是独立
 - `dialogue`：规范化与多轮改写，改写模型通过角色对象调用。
 - `intent`：实体预匹配与领域意图，意图模型通过角色对象调用。
 - `entity`：候选抽取与实体链接，抽取模型通过角色对象调用，最终链接仍为确定性实现。
-- `retrieval`：查询规划、校验与执行阶段，当前为声明式角色。
+- `retrieval`：真实确定性检索规划 Agent；守护查询选择和安全回退，执行仍由工作流下游完成。
 - `answer`：图谱回答与直接回答，模型调用通过角色对象完成。
 - `evidence_audit`：真实确定性 Agent，逐项核对回答覆盖、统计缺失来源并在必要时回退为证据化回答。
+
+`RetrievalAgent` 使用独立 `RetrievalPlanningInput`/`RetrievalPlanningResult` 契约，输出受控两跳、属性、聚合、多条件列表、受控关系或 Schema 约束回退计划之一。它不持有 Cypher Guard 或仓储，不能执行查询；多跳仍固定为四种白名单两跳路径。
 
 ## 4. 会话与流式
 
@@ -175,7 +177,7 @@ uv run streamlit run graph_qa/streamlit_app.py
 
 ## 9. 验证基线
 
-- 当前全量 pytest：`200 passed, 5 skipped`。
+- 当前全量 pytest：`213 passed, 5 skipped`。
 - 真实 Neo4j + 模型集成：本地演示和历史验收已通过；本轮默认 pytest 中按配置跳过。
 - Redis 限流、并发、会话集成：历史验收已通过；本轮默认 pytest 中按配置跳过。
 - 真实跨实例 SSE 会话：历史验收已通过；本轮未重跑。
@@ -183,7 +185,7 @@ uv run streamlit run graph_qa/streamlit_app.py
 - 纯召回 Recall@3：`100%`；完整工作流实体 Recall@3：`98.89%`。
 - 未知实体误召回率：`13.33%`；完整工作流 semantic 路径 Recall@3：`95%`。
 - 产品固定集：19/19 grounded；属性事实、聚合、答案包含、结果对象和多跳路径匹配率均为 100%。
-- 产品固定集 P50/P95：64/332 ms。
+- 产品固定集 P50/P95：105/624 ms。
 - 19/19 grounded 回答具有 `verification`，且逐项证据覆盖全部通过。
 - 多轮固定集：20 组 62 轮，outcome 和实体匹配均为 100%。
 - 修复前基线：[retrieval-evaluation-2026-10-28.md](retrieval-evaluation-2026-10-28.md)。
@@ -220,7 +222,7 @@ uv run python -m pytest tests/ -v
 - 没有可靠的 API 请求级硬取消，仍依赖模型和 Neo4j 组件超时。
 - 没有面向最终用户的多用户认证、监控和正式部署收尾。
 - 不实现内容生成第三路由。
-- `retrieval` 仍为声明式 Agent；`evidence_audit` 已成为真实 Agent，但独立拓扑和动态调度仍未完成。
+- `retrieval` 与 `evidence_audit` 已成为真实 Agent；独立 Agent 拓扑和动态调度仍未完成。
 
 ## 11. 当前实现与验证状态
 
@@ -232,13 +234,15 @@ uv run python -m pytest tests/ -v
 - 多条件聚合查询提交：`0244552`。
 - 查询扩展与 Agent 基础层提交：`9c48400`。
 - 证据审核 Agent 与回答校验提交：`b0dc5d2`。
-- 全量 pytest：`200 passed, 5 skipped`。
+- 检索规划 Agent 提交：`80ddc7b`。
+- 全量 pytest：`213 passed, 5 skipped`。
 - 产品固定集：19/19 grounded；属性事实、聚合、答案包含、结果对象和多跳路径匹配率均为 100%。
-- 产品固定集 P50/P95：64/332 ms。
+- 产品固定集 P50/P95：105/624 ms。
 - 多轮固定集：20 组、62 轮，outcome 和实体匹配均为 100%。
 - 真实 120 条 outcome：`117/120`；实体 Recall@3：98.89%；grounded 证据覆盖率：100%。
 - Cypher 通过率：100%；查询执行成功率：100%；`acceptance.passed=true`。
 - 专业问答质量 v1 完整记录：[product-quality-validation-2026-10-31.md](product-quality-validation-2026-10-31.md)。
+- 检索规划 Agent 完整记录：[retrieval-agent-validation-2026-11-01.md](retrieval-agent-validation-2026-11-01.md)。
 - 完整逐题 JSON 保存在本地
   `output/graph_qa/evaluation-120-retrieval-boundaries-final-2026-10-28.json`；
   `output/` 被 Git 忽略，不应依赖该文件恢复结论。
@@ -256,6 +260,11 @@ uv run python -m pytest tests/ -v
 - 多跳截图：`output/playwright/multi-hop-final-2026-10-31.png`。
 - 新浏览器验收已验证“回答校验”区域、`2/2` 证据覆盖、属性计数和缺失来源提示。
 - 回答校验截图：`output/playwright/answer-audit-final-2026-11-01.png`。
+- 检索规划 Agent 浏览器验收已验证属性、统计和受控两跳策略标签。
+- 检索规划截图：
+  `output/playwright/retrieval-agent-attribute-2026-11-01.png`、
+  `output/playwright/retrieval-agent-aggregate-2026-11-01.png`、
+  `output/playwright/retrieval-agent-multi-hop-2026-11-01.png`。
 
 ## 12. 下一步
 
@@ -267,12 +276,11 @@ uv run python -m pytest tests/ -v
 当前优先级：
 
 1. 扩充到 200 条以上独立产品问题集，并开展答案事实人工抽检。
-2. 把检索规划 Agent 从声明式角色演进为有独立输入输出契约的 Agent。
-3. 为回答审核增加语义等价和大规模人工抽检，避免仅依赖文本覆盖。
-4. 降低 semantic 误召回和未知实体直接回答。
-5. 补齐真实 Redis/API 跨实例多轮集成验收。
-6. 保持 FastAPI、Streamlit、Redis、LangGraph、Neo4j、BGE + FAISS 和 Cypher Guard 不回归。
-7. 内部试用、多用户认证、监控和多 worker 继续延后。
+2. 为回答审核增加语义等价和大规模人工抽检，避免仅依赖文本覆盖。
+3. 降低 semantic 误召回和未知实体直接回答。
+4. 补齐真实 Redis/API 跨实例多轮集成验收。
+5. 保持 FastAPI、Streamlit、Redis、LangGraph、Neo4j、BGE + FAISS 和 Cypher Guard 不回归。
+6. 独立 Agent 拓扑、动态调度、内部试用、多用户认证、监控和多 worker 继续延后。
 
 ### 12.1 当前质量基线
 
@@ -286,7 +294,7 @@ uv run python -m pytest tests/ -v
 - `Formula` 中约有 741 个主治、619 个功效字段和 604 个用法字段。
 - 来源关系覆盖：药材 412/2,359，方剂 720/1,020。
 
-属性事实、单跳聚合、多条件列表、白名单两跳和证据审核 Agent 已完成首轮落地。下一阶段重点是检索规划 Agent、负样本语义边界和 200 条以上独立评测。
+属性事实、单跳聚合、多条件列表、白名单两跳、检索规划 Agent 和证据审核 Agent 已完成首轮落地。下一阶段重点是负样本语义边界和 200 条以上独立评测。
 
 ### 12.2 多轮上下文范围
 
@@ -334,7 +342,7 @@ product-quality-roadmap.md，再检查 git status。
 当前不实现内容生成，也不以多 worker 为运行目标。
 当前主线是查询契约已稳定的前提下推进 Agent 演进：
 保持属性和关系证据、多轮上下文、来源披露和固定集评测不回归，
-在证据审核 Agent 已完成的基础上，把检索规划从声明式角色演进为独立、可测试的 Agent。
+检索规划和证据审核 Agent 已完成；下一阶段重点是负样本语义边界、200 条以上产品集和人工事实抽检。
 内部试用和公开上线工程化后续再做。
 开发前按 AGENTS.md 给出方案并等待确认。
 ```
