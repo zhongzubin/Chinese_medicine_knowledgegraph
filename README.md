@@ -2,6 +2,9 @@
 
 一个面向中药与方剂知识的中文知识图谱项目，覆盖网页数据采集、实体关系抽取、Neo4j 图谱导入、可验证问答 API、流式输出和 Streamlit 交互界面。
 
+当前系统架构图见
+[docs/graph_qa/project-architecture.md](docs/graph_qa/project-architecture.md)。
+
 项目当前支持：
 
 - 从中药百科采集中药材和方剂数据，支持限流、断点续爬与 Excel 导出。

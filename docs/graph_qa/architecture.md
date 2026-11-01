@@ -5,6 +5,8 @@
 > 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit、查询扩展与 Agent 基础层
 > 最后更新：2026-11-01
 
+当前实现总览图见 [project-architecture.md](project-architecture.md)。
+
 ## 1. 架构目标
 
 第一版采用“实体链接 + Schema 约束 Text2Cypher”的方案。系统的职责边界是：

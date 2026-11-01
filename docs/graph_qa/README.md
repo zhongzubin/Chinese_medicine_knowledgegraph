@@ -107,6 +107,7 @@ flowchart LR
 [product-quality-roadmap.md](product-quality-roadmap.md)。
 
 完整架构见 [architecture.md](architecture.md)，数据与接口契约见 [contracts.md](contracts.md)，安全及评测规则见 [security-and-evaluation.md](security-and-evaluation.md)。
+当前实现总览图见 [project-architecture.md](project-architecture.md)。
 
 M1 实现中遇到的问题、修复过程和遗留限制记录在 [implementation-challenges.md](implementation-challenges.md)。
 
