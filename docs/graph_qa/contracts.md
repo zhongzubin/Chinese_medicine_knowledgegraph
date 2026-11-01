@@ -202,6 +202,10 @@ LinkedEntity
 
 同一 `(label, name)` 只保留分数最高的结果。不同标签的同名实体不得去重。
 
+具体名称形态的 Herb、Formula、Source 不得仅凭 semantic 候选通过链接。未解析代词不得进入 semantic 实体链接。Effect、Disease、Symptom 的描述性同义召回不受该限制。
+
+未成功链接实体时返回澄清并包含“补充或确认具体名称”要求。已链接实体但无对应属性、关系或路径时返回固定无依据说明，`grounded=false`、`verification=null`，不得由模型补写医疗事实。查询返回记录但无法构造合法证据时仍返回 `NO_GRAPH_EVIDENCE`。
+
 ### 4.4 检索规划
 
 `RetrievalAgent` 使用独立输入和输出契约。输入只包含已确认的上下文数据，不包含仓储、Cypher Guard 或执行权限：

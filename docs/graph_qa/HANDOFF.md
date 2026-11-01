@@ -1,6 +1,6 @@
 # 知识图谱问答交接说明
 
-> 代码基线：`80ddc7b`
+> 代码基线：`dd55231`
 >
 > 交接日期：2026-11-01
 >
@@ -142,7 +142,7 @@ models/bge-large-zh-v1.5
 | `graph_qa/api_security.py` | 多 API Key 配置和校验 |
 | `graph_qa/streamlit_app.py` | Streamlit 双栏客户端 |
 | `evaluation/qa_cases.jsonl` | 120 条黄金问题 |
-| `evaluation/product_quality_cases.jsonl` | 19 条产品固定集：10 属性、6 聚合、1 多条件列表、2 多跳 |
+| `evaluation/product_quality_cases.jsonl` | 200 条产品固定集，覆盖属性、关系、聚合、多条件、多跳、semantic、未知实体、无依据和无来源 |
 | `evaluation/multi_turn_cases.jsonl` | 20 组 62 轮多轮固定集 |
 | `graph_qa/multi_turn_evaluate.py` | 多轮固定集评测入口 |
 
@@ -177,17 +177,16 @@ uv run streamlit run graph_qa/streamlit_app.py
 
 ## 9. 验证基线
 
-- 当前全量 pytest：`213 passed, 5 skipped`。
+- 当前全量 pytest：`221 passed, 5 skipped`。
 - 真实 Neo4j + 模型集成：本地演示和历史验收已通过；本轮默认 pytest 中按配置跳过。
 - Redis 限流、并发、会话集成：历史验收已通过；本轮默认 pytest 中按配置跳过。
 - 真实跨实例 SSE 会话：历史验收已通过；本轮未重跑。
-- 120 条黄金集完整工作流 outcome：`117/120`。
-- 纯召回 Recall@3：`100%`；完整工作流实体 Recall@3：`98.89%`。
-- 未知实体误召回率：`13.33%`；完整工作流 semantic 路径 Recall@3：`95%`。
-- 产品固定集：19/19 grounded；属性事实、聚合、答案包含、结果对象和多跳路径匹配率均为 100%。
-- 产品固定集 P50/P95：105/624 ms。
-- 19/19 grounded 回答具有 `verification`，且逐项证据覆盖全部通过。
-- 多轮固定集：20 组 62 轮，outcome 和实体匹配均为 100%。
+- 120 条黄金集完整工作流 outcome：`119/120`。
+- 纯召回 Recall@3：`100%`；完整工作流实体 Recall@3：`97.78%`。
+- 未知实体误召回率：`0%`；120 条语义路径完整工作流 Recall@3：`90%`。
+- 产品固定集：200/200 outcome 通过，接受门禁通过。
+- 未知实体误召回率 0%，无依据诚实率和无来源披露率均为 100%。
+- 多轮固定集：20 组 62 轮最终全量通过，outcome 和实体匹配均为 100%。
 - 修复前基线：[retrieval-evaluation-2026-10-28.md](retrieval-evaluation-2026-10-28.md)。
 - 本轮修复记录：[retrieval-boundary-fix-2026-10-28.md](retrieval-boundary-fix-2026-10-28.md)。
 - 验收门槛记录：[evaluation-acceptance-2026-10-28.md](evaluation-acceptance-2026-10-28.md)。
@@ -205,8 +204,8 @@ uv run python -m pytest tests/ -v
 
 ## 10. 已知限制
 
-- 120 条黄金集仍不足以代表开放用户表达；semantic 路径完整工作流 Recall@3 为 95%。
-- `0.56` 阈值仍有 2 条低分 semantic 未知实体误召回，需后续单独校准。
+- 120 条黄金集仍不足以代表开放用户表达；semantic 路径完整工作流 Recall@3 为 90%。
+- 显式名称型未知实体的 semantic 误召回已降为 0；描述性 semantic 仍有路径与目标标签差异。
 - 长未知词子串、通用词语义候选和无关证据 grounded 已完成首轮修复。
 - 属性级 Effect 候选仍可能被 Disease、Symptom 或通用部位词抢占。
 - 属性查询已进入回答上下文；当前覆盖白名单属性、一跳正向/反向关系、单跳和多条件计数、多条件结果列表以及四种白名单两跳。
@@ -215,7 +214,7 @@ uv run python -m pytest tests/ -v
 - Redis 5 轮会话已通过 20 组、62 轮固定集；更长上下文和跨端用户身份仍不在当前范围。
 - 新会话初始化和失败轮次会话 ID 问题已修复。
 - 回答审核 Agent 使用确定性文本覆盖检查，尚未完成语义等价判断和大规模人工事实审核。
-- 产品固定集目前 19 条，总产品评测集尚未达到 200 条目标。
+- 产品固定集已达到 200 条；50 条独立人工事实复核仍待完成。
 - 本地演示一次上下文追问完整等待约 70 秒，模型阶段仍有延迟波动。
 - 会话作用域是 API 客户端，不是最终登录用户。
 - 当前本地运行目标为单 worker；每个 worker 会重复加载约 1.3GB BGE 模型。
@@ -223,6 +222,7 @@ uv run python -m pytest tests/ -v
 - 没有面向最终用户的多用户认证、监控和正式部署收尾。
 - 不实现内容生成第三路由。
 - `retrieval` 与 `evidence_audit` 已成为真实 Agent；独立 Agent 拓扑和动态调度仍未完成。
+- 澄清后未解析代词已阻止进入 semantic 链接；最终 62 轮全量通过。
 
 ## 11. 当前实现与验证状态
 
@@ -235,14 +235,15 @@ uv run python -m pytest tests/ -v
 - 查询扩展与 Agent 基础层提交：`9c48400`。
 - 证据审核 Agent 与回答校验提交：`b0dc5d2`。
 - 检索规划 Agent 提交：`80ddc7b`。
-- 全量 pytest：`213 passed, 5 skipped`。
-- 产品固定集：19/19 grounded；属性事实、聚合、答案包含、结果对象和多跳路径匹配率均为 100%。
-- 产品固定集 P50/P95：105/624 ms。
-- 多轮固定集：20 组、62 轮，outcome 和实体匹配均为 100%。
-- 真实 120 条 outcome：`117/120`；实体 Recall@3：98.89%；grounded 证据覆盖率：100%。
+- 未知实体、无依据与 200 条产品集提交：`dd55231`。
+- 全量 pytest：`221 passed, 5 skipped`。
+- 产品固定集：200/200 outcome 通过；未知实体误召回 0%，无依据与无来源披露 100%。
+- 真实 120 条 outcome：`119/120`；实体 Recall@3：97.78%；grounded 证据覆盖率：100%。
+- 多轮最终全量：20 组、62 轮，outcome 和实体匹配均为 100%。
 - Cypher 通过率：100%；查询执行成功率：100%；`acceptance.passed=true`。
 - 专业问答质量 v1 完整记录：[product-quality-validation-2026-10-31.md](product-quality-validation-2026-10-31.md)。
 - 检索规划 Agent 完整记录：[retrieval-agent-validation-2026-11-01.md](retrieval-agent-validation-2026-11-01.md)。
+- 未知实体、无依据与 200 条产品集记录：[quality-boundary-validation-2026-11-01.md](quality-boundary-validation-2026-11-01.md)。
 - 完整逐题 JSON 保存在本地
   `output/graph_qa/evaluation-120-retrieval-boundaries-final-2026-10-28.json`；
   `output/` 被 Git 忽略，不应依赖该文件恢复结论。
@@ -275,26 +276,26 @@ uv run python -m pytest tests/ -v
 
 当前优先级：
 
-1. 扩充到 200 条以上独立产品问题集，并开展答案事实人工抽检。
-2. 为回答审核增加语义等价和大规模人工抽检，避免仅依赖文本覆盖。
-3. 降低 semantic 误召回和未知实体直接回答。
-4. 补齐真实 Redis/API 跨实例多轮集成验收。
-5. 保持 FastAPI、Streamlit、Redis、LangGraph、Neo4j、BGE + FAISS 和 Cypher Guard 不回归。
-6. 独立 Agent 拓扑、动态调度、内部试用、多用户认证、监控和多 worker 继续延后。
+1. 完成 50 条独立人工事实复核。
+2. 为回答审核增加语义等价判断和更大规模人工抽检。
+3. 补齐真实 Redis/API 跨实例多轮集成验收。
+4. 保持 FastAPI、Streamlit、Redis、LangGraph、Neo4j、BGE + FAISS 和 Cypher Guard 不回归。
+5. 质量门禁完成后进入独立 Agent 拓扑或动态调度。
+6. 内部试用、多用户认证、监控和多 worker 继续延后。
 
 ### 12.1 当前质量基线
 
 - Neo4j 实际有 11,043 个节点和 26,324 条关系。
 - 6 类实体、6 类关系、14 种元数据三元组模式。
-- 当前 120 条评测 outcome 为 117/120。
-- 产品固定集 19/19；多轮固定集 20 组 62 轮全部通过。
-- 产品回答审核覆盖率 19/19；逐项证据覆盖 19/19。
+- 当前 120 条评测 outcome 为 119/120。
+- 产品固定集 200/200；多轮集 20 组 62 轮全部通过。
+- 产品回答审核覆盖率和逐项证据覆盖率均为 100%。
 - 原 120 条仍没有显式 `no_evidence` 用例；属性集规模也需继续扩大。
 - `Herb` 中约有 1,466 个性味、1,236 个归经、1,219 个用量和 851 个禁忌字段。
 - `Formula` 中约有 741 个主治、619 个功效字段和 604 个用法字段。
 - 来源关系覆盖：药材 412/2,359，方剂 720/1,020。
 
-属性事实、单跳聚合、多条件列表、白名单两跳、检索规划 Agent 和证据审核 Agent 已完成首轮落地。下一阶段重点是负样本语义边界和 200 条以上独立评测。
+属性事实、单跳聚合、多条件列表、白名单两跳、检索规划 Agent、证据审核 Agent、200 条产品集和负样本语义边界已完成首轮落地。下一阶段重点是最终多轮全量、人工事实复核和独立 Agent 拓扑。
 
 ### 12.2 多轮上下文范围
 
@@ -342,7 +343,7 @@ product-quality-roadmap.md，再检查 git status。
 当前不实现内容生成，也不以多 worker 为运行目标。
 当前主线是查询契约已稳定的前提下推进 Agent 演进：
 保持属性和关系证据、多轮上下文、来源披露和固定集评测不回归，
-检索规划和证据审核 Agent 已完成；下一阶段重点是负样本语义边界、200 条以上产品集和人工事实抽检。
+检索规划、证据审核 Agent、未知实体边界和 200 条产品集已完成；下一阶段重点是最终多轮全量、人工事实复核，然后进入独立 Agent 拓扑或动态调度。
 内部试用和公开上线工程化后续再做。
 开发前按 AGENTS.md 给出方案并等待确认。
 ```
