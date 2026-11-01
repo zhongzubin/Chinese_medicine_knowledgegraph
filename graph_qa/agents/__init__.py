@@ -6,6 +6,7 @@ from graph_qa.agents.evidence_audit import (
     AuditDecision,
     EvidenceAuditAgent,
 )
+from graph_qa.agents.retrieval import RetrievalAgent
 from graph_qa.agents.roles import (
     AnswerAgent,
     DialogueAgent,
@@ -24,4 +25,5 @@ __all__ = [
     "EvidenceAuditAgent",
     "IntentAgent",
     "QAAgentTeam",
+    "RetrievalAgent",
 ]

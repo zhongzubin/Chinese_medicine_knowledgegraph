@@ -4,14 +4,23 @@
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 EntityLabel = Literal["Herb", "Formula", "Disease", "Symptom", "Effect", "Source"]
 MatchType = Literal["name", "alias", "fuzzy", "semantic"]
 AggregateDirection = Literal["outgoing", "incoming"]
+RetrievalPlanKind = Literal[
+    "controlled_multi_hop",
+    "controlled_attribute",
+    "controlled_aggregate",
+    "controlled_multi_condition_list",
+    "controlled_relationship",
+    "schema_constrained_cypher",
+    "rejected",
+]
 
 MEDICAL_DISCLAIMER = "以上内容仅供中医药知识参考，不能替代专业医疗诊断和治疗。"
 
@@ -204,9 +213,62 @@ class CypherPlan(StrictModel):
         return value
 
 
+class RetrievalPlanningInput(StrictModel):
+    question: str = Field(min_length=1, max_length=500)
+    linked_entities: List[LinkedEntity] = Field(min_length=1)
+    validation_errors: List[str] = Field(default_factory=list)
+    attribute_query_attempted: bool = False
+    query_attempts: int = Field(default=0, ge=0)
+
+    @field_validator("question")
+    @classmethod
+    def strip_question(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("检索规划问题不能为空")
+        return value
+
+
+class RetrievalPlanningResult(StrictModel):
+    plan_kind: RetrievalPlanKind
+    plan: Optional[
+        Union[
+            AttributeQueryPlan,
+            AggregateQueryPlan,
+            MultiConditionQueryPlan,
+            MultiHopQueryPlan,
+            CypherPlan,
+        ]
+    ] = None
+    query_attempts: int = Field(default=0, ge=0)
+    validation_errors: List[str] = Field(default_factory=list)
+    last_error_code: Optional[ErrorCode] = None
+
+    @model_validator(mode="after")
+    def validate_plan_payload(self) -> "RetrievalPlanningResult":
+        expected_plan_type = {
+            "controlled_multi_hop": MultiHopQueryPlan,
+            "controlled_attribute": AttributeQueryPlan,
+            "controlled_aggregate": AggregateQueryPlan,
+            "controlled_multi_condition_list": MultiConditionQueryPlan,
+            "controlled_relationship": CypherPlan,
+            "schema_constrained_cypher": CypherPlan,
+        }.get(self.plan_kind)
+        if expected_plan_type is None:
+            if self.plan is not None:
+                raise ValueError("拒绝的检索计划不能携带查询计划")
+            return self
+        if not isinstance(self.plan, expected_plan_type):
+            raise ValueError(
+                f"{self.plan_kind} 必须携带 {expected_plan_type.__name__}"
+            )
+        return self
+
+
 class QueryInfo(StrictModel):
     cypher: str
     parameters: Dict[str, Any] = Field(default_factory=dict)
+    plan_kind: Optional[RetrievalPlanKind] = None
 
 
 class QueryResult(StrictModel):

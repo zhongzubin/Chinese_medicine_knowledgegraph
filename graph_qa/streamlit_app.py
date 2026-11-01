@@ -38,6 +38,18 @@ def _answer_markdown(answer: str) -> str:
     return answer or "正在生成回答…"
 
 
+def _stage_display_label(event_data: dict) -> Optional[str]:
+    stage_label = event_data.get("label")
+    plan_label = event_data.get("plan_label")
+    if (
+        event_data.get("stage") == "plan_cypher"
+        and stage_label
+        and plan_label
+    ):
+        return f"{stage_label}（{plan_label}）"
+    return stage_label
+
+
 def main() -> None:
     st.set_page_config(
         page_title="中医知识图谱问答",
@@ -128,9 +140,9 @@ def main() -> None:
                 response.iter_lines(decode_unicode=True)
             ):
                 if event_name == "stage":
-                    stage_label = event_data.get("label")
-                    if stage_label and stage_label not in progress_labels:
-                        progress_labels.append(stage_label)
+                    display_label = _stage_display_label(event_data)
+                    if display_label and display_label not in progress_labels:
+                        progress_labels.append(display_label)
                         progress_placeholder.markdown(
                             "\n".join(
                                 f"- {item}" for item in progress_labels

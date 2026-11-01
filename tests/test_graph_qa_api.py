@@ -422,6 +422,43 @@ def test_qa_serializes_answer_verification():
     assert response.json()["verification"]["checked_items"] == 1
 
 
+def test_qa_serializes_retrieval_plan_kind():
+    engine = FakeEngine(
+        response=GraphQAResponse(
+            question="四君子汤所含药材有什么功效？",
+            answer="四君子汤所含人参具有补气功效。",
+            grounded=True,
+            query=QueryInfo(
+                cypher="MATCH ... RETURN ... LIMIT 20",
+                parameters={"entity_names": ["四君子汤"]},
+                plan_kind="controlled_multi_hop",
+            ),
+            paths=[
+                PathEvidence(
+                    root="四君子汤",
+                    root_label="Formula",
+                    first_relationship="HAS_INGREDIENT",
+                    intermediate="人参",
+                    intermediate_label="Herb",
+                    second_relationship="HAS_EFFECT",
+                    target="补气",
+                    target_label="Effect",
+                )
+            ],
+        )
+    )
+
+    with TestClient(make_app(engine, FakeLimitStore())) as client:
+        response = client.post(
+            "/api/v1/qa",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={"question": "四君子汤所含药材有什么功效？"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["query"]["plan_kind"] == "controlled_multi_hop"
+
+
 def test_missing_or_wrong_api_key_returns_same_unauthorized_response():
     engine = FakeEngine()
     store = FakeLimitStore()

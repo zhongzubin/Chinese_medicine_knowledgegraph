@@ -20,6 +20,7 @@ from graph_qa.models import (
     MultiHopQueryPlan,
     PathEvidence,
     QueryResult,
+    RetrievalPlanKind,
 )
 
 
@@ -43,6 +44,7 @@ class AgentState(TypedDict, total=False):
     multi_condition_plan: Optional[MultiConditionQueryPlan]
     multi_hop_plan: Optional[MultiHopQueryPlan]
     cypher_plan: Optional[CypherPlan]
+    retrieval_plan_kind: Optional[RetrievalPlanKind]
     query_attempts: int
     validation_errors: Annotated[List[str], operator.add]
     last_error_code: Optional[str]

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Streamlit SSE 解析测试。"""
 
-from graph_qa.streamlit_app import parse_sse_lines
+from graph_qa.streamlit_app import _stage_display_label, parse_sse_lines
 
 
 def test_parse_sse_lines_handles_multiple_events_and_utf8():
@@ -102,3 +102,24 @@ def test_parse_sse_lines_accepts_answer_audit_event():
 
     assert events[0][0] == "audit"
     assert events[0][1]["checked_items"] == 3
+
+
+def test_stage_display_label_only_adds_safe_retrieval_plan_type():
+    plan_label = _stage_display_label(
+        {
+            "stage": "plan_cypher",
+            "label": "生成图谱查询",
+            "plan_kind": "controlled_multi_hop",
+            "plan_label": "受控两跳",
+        }
+    )
+    generic_label = _stage_display_label(
+        {
+            "stage": "validate_cypher",
+            "label": "校验查询安全",
+            "plan_label": "不应显示",
+        }
+    )
+
+    assert plan_label == "生成图谱查询（受控两跳）"
+    assert generic_label == "校验查询安全"

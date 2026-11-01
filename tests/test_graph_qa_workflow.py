@@ -417,6 +417,7 @@ def test_workflow_returns_grounded_answer_query_and_evidence():
     assert response.query
     assert "HAS_EFFECT" in response.query.cypher
     assert "$entity_names" in response.query.cypher
+    assert response.query.plan_kind == "controlled_relationship"
     assert response.evidence[0].object == "发汗"
     assert response.verification is not None
     assert response.verification.status == "passed"
@@ -451,6 +452,7 @@ def test_attribute_question_uses_controlled_template_and_facts():
     }
     assert all(item.source == "《中药大辞典》" for item in response.facts)
     assert response.query is not None
+    assert response.query.plan_kind == "controlled_attribute"
     assert repository.attribute_calls == 1
     assert repository.execute_calls == 0
     assert reasoner.plan_calls == 0
@@ -552,6 +554,7 @@ def test_formula_ingredient_question_uses_relationship_template():
     assert response.evidence[0].object == "人参"
     assert response.query is not None
     assert "HAS_INGREDIENT" in response.query.cypher
+    assert response.query.plan_kind == "controlled_relationship"
     assert reasoner.plan_calls == 0
     assert repository.execute_calls == 1
 
@@ -575,6 +578,7 @@ def test_reverse_formula_lookup_uses_relationship_template():
     assert response.grounded is True
     assert response.query is not None
     assert "object.name IN $entity_names" in response.query.cypher
+    assert response.query.plan_kind == "controlled_relationship"
     assert reasoner.plan_calls == 0
 
 
@@ -627,6 +631,7 @@ def test_reverse_aggregate_counts_formulas_containing_herb():
     assert response.aggregates[0].count == 7
     assert response.query is not None
     assert "count(DISTINCT subject)" in response.query.cypher
+    assert response.query.plan_kind == "controlled_aggregate"
     assert reasoner.plan_calls == 0
 
 
@@ -645,6 +650,7 @@ def test_multi_condition_aggregate_requires_both_herbs():
     assert response.grounded is True
     assert response.aggregates[0].count == 7
     assert response.aggregates[0].description == "同时关联到人参、白术的方剂"
+    assert response.query.plan_kind == "controlled_aggregate"
     assert repository.aggregate_plans[0].require_all_entities is True
     assert reasoner.plan_calls == 0
 
@@ -683,6 +689,7 @@ def test_multi_condition_list_returns_matching_formulas_and_evidence():
     response = engine.answer("同时含有人参和白术的方剂有哪些？")
 
     assert response.grounded is True
+    assert response.query.plan_kind == "controlled_multi_condition_list"
     assert response.answer.startswith(
         "根据当前图谱，同时关联到人参、白术的方剂如下："
     )
@@ -724,6 +731,7 @@ def test_multi_hop_question_returns_paths_and_deterministic_answer():
 
     assert response.grounded is True
     assert response.error is None
+    assert response.query.plan_kind == "controlled_multi_hop"
     assert len(response.paths) == 1
     assert response.paths[0].intermediate == "人参"
     assert response.paths[0].target == "补气"
@@ -971,6 +979,14 @@ def test_stream_answer_emits_public_stages_progress_and_answer_deltas():
     )
     done = next(event for event in events if event.event == "done")
     audit = next(event for event in events if event.event == "audit")
+    plan_stages = [
+        event.data
+        for event in events
+        if (
+            event.event == "stage"
+            and event.data.get("stage") == "plan_cypher"
+        )
+    ]
 
     assert {
         "normalize",
@@ -983,6 +999,21 @@ def test_stream_answer_emits_public_stages_progress_and_answer_deltas():
     assert done.data["response"]["grounded"] is True
     assert done.data["response"]["verification"]["status"] == "passed"
     assert audit.data["agent"] == "evidence_audit"
+    assert [
+        item["plan_kind"]
+        for item in plan_stages
+    ] == [
+        "controlled_attribute",
+        "controlled_relationship",
+    ]
+    assert [
+        item["plan_label"]
+        for item in plan_stages
+    ] == ["图谱属性", "受控关系"]
+    assert all(
+        "cypher" not in item and "parameters" not in item
+        for item in plan_stages
+    )
 
 
 def test_unsupported_answer_is_replaced_by_evidence_fallback():

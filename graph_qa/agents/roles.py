@@ -6,6 +6,7 @@ from typing import Callable, Optional, Sequence
 
 from graph_qa.agents.base import AgentDescriptor, AgentRegistry
 from graph_qa.agents.evidence_audit import EvidenceAuditAgent
+from graph_qa.agents.retrieval import RetrievalAgent
 from graph_qa.models import (
     AttributeFact,
     ConversationTurn,
@@ -15,6 +16,7 @@ from graph_qa.models import (
     LinkedEntity,
     RewriteResult,
 )
+from graph_qa.schema import GraphSchema
 
 
 @dataclass
@@ -135,9 +137,12 @@ class AnswerAgent:
 @dataclass
 class QAAgentTeam:
     reasoner: object
+    schema: GraphSchema
+    max_results: int = 50
     dialogue: DialogueAgent = field(init=False)
     intent: IntentAgent = field(init=False)
     entity: EntityAgent = field(init=False)
+    retrieval: RetrievalAgent = field(init=False)
     evidence_audit: EvidenceAuditAgent = field(init=False)
     answer: AnswerAgent = field(init=False)
     registry: AgentRegistry = field(init=False)
@@ -146,6 +151,11 @@ class QAAgentTeam:
         self.dialogue = DialogueAgent(self.reasoner)
         self.intent = IntentAgent(self.reasoner)
         self.entity = EntityAgent(self.reasoner)
+        self.retrieval = RetrievalAgent(
+            reasoner=self.reasoner,
+            schema=self.schema,
+            max_results=self.max_results,
+        )
         self.evidence_audit = EvidenceAuditAgent()
         self.answer = AnswerAgent(self.reasoner)
         self.registry = AgentRegistry(
@@ -153,12 +163,7 @@ class QAAgentTeam:
                 self.dialogue.descriptor,
                 self.intent.descriptor,
                 self.entity.descriptor,
-                AgentDescriptor(
-                    name="retrieval",
-                    responsibility="选择受控查询计划并执行只读图谱检索",
-                    stages=("plan_cypher", "validate_cypher", "execute_cypher"),
-                    tools=("attribute_template", "aggregate_template", "cypher_guard", "neo4j"),
-                ),
+                self.retrieval.descriptor,
                 self.answer.descriptor,
                 self.evidence_audit.descriptor,
             ]
