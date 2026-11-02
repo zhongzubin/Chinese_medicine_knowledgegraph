@@ -167,7 +167,7 @@ Invoke-RestMethod http://127.0.0.1:8000/health
 未覆盖项：
 
 - 非中医和安全拒绝在浏览器中未重复实测，但已有 API/工作流单元测试覆盖。
-- 任意深度多跳、动态 Agent 调度和 200 条以上产品集尚未纳入本轮验收。
+- 任意深度多跳和动态 Agent 调度尚未纳入本轮验收。
 - 未进行公网、多用户、多实例或容量压测。
 
 ### 9.1 专业问答质量 v1 浏览器补充验收
@@ -221,3 +221,17 @@ Invoke-RestMethod http://127.0.0.1:8000/health
   `output/playwright/retrieval-agent-attribute-2026-11-01.png`、
   `output/playwright/retrieval-agent-aggregate-2026-11-01.png`、
   `output/playwright/retrieval-agent-multi-hop-2026-11-01.png`。
+
+### 9.5 未知实体与无依据浏览器验收
+
+日期：2026-11-01。
+
+- 输入“玄霜参有什么功效？”，页面显示“请求补充实体”，未链接到其他药材，也未执行图查询。
+- 输入“一匹绸有哪些禁忌？”，页面显示已识别实体但没有可验证依据。
+- 输入“一品红的性味是什么？”，页面返回图谱属性并明确标记“未提供出处”。
+- 输入“麻黄性味归经是什么？”，正常返回两项属性，正向路径未回归。
+- 截图：
+  `output/playwright/unknown-entity-clarification-2026-11-01.png`、
+  `output/playwright/no-evidence-response-2026-11-01.png`、
+  `output/playwright/source-missing-disclosure-2026-11-01.png`、
+  `output/playwright/unknown-boundary-positive-regression-2026-11-01.png`。

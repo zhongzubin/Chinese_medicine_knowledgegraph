@@ -10,7 +10,7 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
-from graph_qa.agents import QAAgentTeam
+from graph_qa.agents import QAAgentTeam, RetrievalLoopObservation
 from graph_qa.agents.evidence_audit import (
     aggregate_answer,
     context_fallback_answer,
@@ -18,10 +18,11 @@ from graph_qa.agents.evidence_audit import (
 )
 from graph_qa.agents.retrieval import (
     RETRIEVAL_PLAN_LABELS,
+    has_tcm_query_cue,
     requested_attributes,
 )
 from graph_qa.cypher_guard import CypherGuard, CypherGuardError, detect_unsafe_question
-from graph_qa.entity_linker import EntityIndex
+from graph_qa.entity_linker import EntityIndex, question_mentions_named_entity
 from graph_qa.llm import QAReasoner, ReasonerError
 from graph_qa.models import (
     AggregateFact,
@@ -46,10 +47,12 @@ from graph_qa.state import AgentState
 
 WHITESPACE_RE = re.compile(r"\s+")
 
-NO_EVIDENCE_ANSWER = "当前图谱没有找到足以回答该问题的依据。"
+NO_EVIDENCE_ANSWER = (
+    "已识别到相关图谱实体，但当前图谱没有找到足以回答该问题的依据。"
+)
 CLARIFY_ANSWER = (
-    "我暂时没有在知识图谱中匹配到具体实体。"
-    "请补充药材、方剂、疾病、症状、功效或文献名称后再试。"
+    "当前图谱未识别出具体实体，不能据此生成医疗事实。"
+    "请补充或确认药材、方剂、疾病、症状、功效或文献名称后再试。"
 )
 SAFE_RETRY_ANSWER = "未能生成符合只读安全规则的图谱查询，请换一种更具体的问法。"
 
@@ -77,6 +80,7 @@ STAGE_LABELS = {
     "plan_cypher": "生成图谱查询",
     "validate_cypher": "校验查询安全",
     "execute_cypher": "执行图谱查询",
+    "retrieve_observe": "观察检索结果并决定下一步",
     "answer_from_graph": "生成图谱回答",
     "verify_answer": "校验答案",
     "direct_answer": "生成直接回答",
@@ -457,6 +461,7 @@ class GraphQAEngine:
         builder.add_node("plan_cypher", self._plan_cypher)
         builder.add_node("validate_cypher", self._validate_cypher)
         builder.add_node("execute_cypher", self._execute_cypher)
+        builder.add_node("retrieve_observe", self._retrieve_observe)
         builder.add_node("answer_from_graph", self._answer_from_graph)
         builder.add_node("verify_answer", self._verify_answer)
         builder.add_node("direct_answer", self._direct_answer)
@@ -501,17 +506,18 @@ class GraphQAEngine:
             self._route_after_validate,
             {
                 "execute_cypher": "execute_cypher",
-                "plan_cypher": "plan_cypher",
-                "safe_fail": "safe_fail",
+                "retrieve_observe": "retrieve_observe",
             },
         )
+        builder.add_edge("execute_cypher", "retrieve_observe")
         builder.add_conditional_edges(
-            "execute_cypher",
-            self._route_after_execute,
+            "retrieve_observe",
+            self._route_after_observe,
             {
+                "plan_cypher": "plan_cypher",
                 "answer_from_graph": "answer_from_graph",
                 "no_evidence": "no_evidence",
-                "plan_cypher": "plan_cypher",
+                "safe_fail": "safe_fail",
                 "finish": "finish",
             },
         )
@@ -655,8 +661,22 @@ class GraphQAEngine:
                 ),
                 "stage_events": ["classify_intent"],
             }
+        question = _active_question(state)
+        if (
+            question_mentions_named_entity(question)
+            and has_tcm_query_cue(question)
+        ):
+            return {
+                "intent": IntentResult(
+                    is_tcm_question=True,
+                    confidence=0.80,
+                    matched_domain_terms=[],
+                    reason_code="TCM_QUERY_PATTERN",
+                ),
+                "stage_events": ["classify_intent"],
+            }
         try:
-            intent = self.agents.intent.classify(_active_question(state))
+            intent = self.agents.intent.classify(question)
             return {"intent": intent, "stage_events": ["classify_intent"]}
         except ReasonerError as exc:
             return self._terminal_error(
@@ -705,11 +725,26 @@ class GraphQAEngine:
             )
 
     def _link_entities(self, state: AgentState) -> Dict[str, Any]:
+        active_question = _active_question(state)
+        if (
+            not state.get("prelinked_entities")
+            and any(
+                pronoun in active_question
+                for pronoun in CONTEXT_PRONOUNS
+            )
+        ):
+            return {
+                "linked_entities": [],
+                "warnings": [
+                    "指代对象仍未确认，本轮未执行实体语义匹配。"
+                ],
+                "stage_events": ["link_entities"],
+            }
         candidate_linked = []
         if state.get("entity_candidates"):
             candidate_linked = self.entity_index.match(
                 state["entity_candidates"],
-                _active_question(state),
+                active_question,
                 limit_per_label=self.entity_limit,
             )
         best_by_key = {
@@ -739,6 +774,8 @@ class GraphQAEngine:
         )
         update: Dict[str, Any] = {
             "retrieval_plan_kind": result.plan_kind,
+            "retrieval_steps": state.get("retrieval_steps", 0) + 1,
+            "retrieval_next_action": None,
             "query_attempts": result.query_attempts,
             "attribute_relation_fallback": False,
             "multi_hop_plan": None,
@@ -1288,6 +1325,38 @@ class GraphQAEngine:
             )
         return update
 
+    def _retrieve_observe(self, state: AgentState) -> Dict[str, Any]:
+        query_result = state.get("query_result")
+        observation = RetrievalLoopObservation(
+            step=state.get("retrieval_steps", 0),
+            max_steps=self.max_attempts,
+            plan_kind=state.get("retrieval_plan_kind"),
+            is_valid=bool(state.get("is_cypher_valid")),
+            error_code=state.get("error_code"),
+            attribute_relation_fallback=bool(
+                state.get("attribute_relation_fallback")
+            ),
+            has_context=bool(
+                state.get("evidence")
+                or state.get("facts")
+                or state.get("aggregates")
+                or state.get("paths")
+            ),
+            row_count=query_result.row_count if query_result else 0,
+        )
+        decision = self.agents.retrieval.observe(observation)
+        trace = {
+            "step": observation.step,
+            "plan_kind": observation.plan_kind,
+            "next_action": decision.next_action,
+            "reason_code": decision.reason_code,
+        }
+        return {
+            "retrieval_next_action": decision.next_action,
+            "retrieval_trace": [trace],
+            "stage_events": ["retrieve_observe"],
+        }
+
     def _answer_from_graph(self, state: AgentState) -> Dict[str, Any]:
         evidence = state.get("evidence", [])
         facts = state.get("facts", [])
@@ -1532,7 +1601,7 @@ class GraphQAEngine:
         return {
             "answer": answer,
             "grounded": False,
-            "warnings": ["未找到可以用于图谱查询的具体实体。"],
+            "warnings": ["未确认具体实体，本轮未执行图谱查询。"],
             "stage_events": ["clarify"],
         }
 
@@ -1542,7 +1611,7 @@ class GraphQAEngine:
         return {
             "answer": answer,
             "grounded": False,
-            "warnings": ["图谱查询没有返回记录。"],
+            "warnings": ["已识别实体，但本轮没有找到可验证的图谱证据。"],
             "stage_events": ["no_evidence"],
         }
 
@@ -1592,27 +1661,12 @@ class GraphQAEngine:
     def _route_after_validate(self, state: AgentState) -> str:
         if state.get("is_cypher_valid"):
             return "execute_cypher"
-        if state.get("query_attempts", 0) < self.max_attempts:
-            return "plan_cypher"
-        return "safe_fail"
+        return "retrieve_observe"
 
     @staticmethod
-    def _route_after_execute(state: AgentState) -> str:
-        if state.get("error_code"):
-            return "finish"
-        if state.get("attribute_relation_fallback"):
-            return "plan_cypher"
-        if (
-            state.get("aggregates")
-            or state.get("facts")
-            or state.get("evidence")
-            or state.get("paths")
-        ):
-            return "answer_from_graph"
-        result = state.get("query_result")
-        if result is None or result.row_count == 0:
-            return "no_evidence"
-        return "no_evidence"
+    def _route_after_observe(state: AgentState) -> str:
+        action = state.get("retrieval_next_action") or "finish"
+        return "plan_cypher" if action == "replan" else action
 
     def _initial_state(
         self,
@@ -1644,6 +1698,9 @@ class GraphQAEngine:
             "multi_hop_plan": None,
             "cypher_plan": None,
             "retrieval_plan_kind": None,
+            "retrieval_steps": 0,
+            "retrieval_next_action": None,
+            "retrieval_trace": [],
             "query_result": None,
             "facts": [],
             "aggregates": [],
@@ -1791,6 +1848,19 @@ class GraphQAEngine:
                                     plan_kind,
                                     plan_kind,
                                 )
+                            )
+                        if node_name == "retrieve_observe":
+                            trace = (
+                                update.get("retrieval_trace") or [{}]
+                            )[-1]
+                            stage_data["step"] = trace.get("step", 0)
+                            stage_data["decision"] = trace.get(
+                                "next_action",
+                                "",
+                            )
+                            stage_data["reason_code"] = trace.get(
+                                "reason_code",
+                                "",
                             )
                         yield GraphQAStreamEvent(
                             event="stage",

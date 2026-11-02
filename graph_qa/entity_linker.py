@@ -182,6 +182,11 @@ FUZZY_SUFFIX_CHARACTERS = frozenset(
         "茶",
     }
 )
+NAMED_ENTITY_SUFFIXES = frozenset(
+    set(FUZZY_SUFFIX_CHARACTERS)
+    | {"病", "症", "证", "芝", "藻", "菌"}
+)
+SEMANTIC_NAMED_LABELS = frozenset({"Herb", "Formula", "Source"})
 
 
 def normalize_entity_text(value: str) -> str:
@@ -229,6 +234,24 @@ def _semantic_question_text(question: str) -> str:
     for term in sorted(GENERIC_ENTITY_TERMS, key=len, reverse=True):
         normalized = normalized.replace(term, "")
     return normalized
+
+
+def looks_like_named_entity(text: str) -> bool:
+    """判断文本是否像一个具体实体名称，而不是同义描述。"""
+    normalized = normalize_entity_text(text)
+    return (
+        2 <= len(normalized) <= 20
+        and normalized[-1] in NAMED_ENTITY_SUFFIXES
+    )
+
+
+def question_mentions_named_entity(question: str) -> bool:
+    """判断问题中是否出现具体实体名称形态。"""
+    normalized = normalize_entity_text(question)
+    return any(
+        normalized.find(suffix) > 0
+        for suffix in NAMED_ENTITY_SUFFIXES
+    )
 
 
 def _is_plausible_fuzzy_variant(candidate: str, term: str) -> bool:
@@ -461,16 +484,43 @@ class EntityIndex:
                 if fuzzy_matches:
                     results.extend(fuzzy_matches)
                 elif self.semantic_index is not None:
-                    results.extend(self.semantic_index.match(candidate.text))
+                    results.extend(
+                        self._semantic_matches_for_candidate(
+                            candidate.text,
+                            self.semantic_index.match(candidate.text),
+                        )
+                    )
 
         if not results:
             results.extend(self._direct_question_matches(normalized_question, None))
         if not results and self.semantic_index is not None:
             semantic_question = _semantic_question_text(question)
             if semantic_question:
-                results.extend(self.semantic_index.match(semantic_question))
+                semantic_matches = self.semantic_index.match(
+                    semantic_question
+                )
+                if question_mentions_named_entity(question):
+                    semantic_matches = [
+                        item
+                        for item in semantic_matches
+                        if item.label not in SEMANTIC_NAMED_LABELS
+                    ]
+                results.extend(semantic_matches)
 
         return self._finalize(results, limit_per_label)
+
+    @staticmethod
+    def _semantic_matches_for_candidate(
+        text: str,
+        matches: Sequence[LinkedEntity],
+    ) -> List[LinkedEntity]:
+        if not looks_like_named_entity(text):
+            return list(matches)
+        return [
+            item
+            for item in matches
+            if item.label not in SEMANTIC_NAMED_LABELS
+        ]
 
     def match_exact(
         self,

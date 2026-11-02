@@ -5,6 +5,8 @@
 > 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit、查询扩展与 Agent 基础层
 > 最后更新：2026-11-01
 
+当前实现总览图见 [project-architecture.md](project-architecture.md)。
+
 ## 1. 架构目标
 
 第一版采用“实体链接 + Schema 约束 Text2Cypher”的方案。系统的职责边界是：
@@ -101,6 +103,9 @@ flowchart TB
 | `multi_hop_plan` | 仅包含两个步骤的白名单路径计划 |
 | `cypher_plan` | Text2Cypher 候选查询和参数 |
 | `retrieval_plan_kind` | 本轮最终选中的受控查询策略，用于响应和公开阶段展示 |
+| `retrieval_steps` | 当前 Agent 已执行的计划/观察循环次数 |
+| `retrieval_next_action` | 观察节点给出的下一步动作 |
+| `retrieval_trace` | 不含隐藏推理的循环轨迹，记录步骤、策略、决策和原因码 |
 | `validation_errors` | 安全或语法校验问题 |
 | `query_attempts` | 已生成查询的次数 |
 | `query_result` | 实际返回的受控查询结果 |
@@ -125,11 +130,11 @@ flowchart TB
 | `dialogue` | `normalize`、`rewrite_question` | 上下文相关追问通过角色对象调用改写模型，并提供历史降级 |
 | `intent` | `prelink_entities`、`classify_intent` | 已知实体预匹配由确定性代码完成，未命中时通过角色对象分类 |
 | `entity` | `extract_entities`、`link_entities` | 模型候选抽取通过角色对象完成，最终链接由确定性链接器确认 |
-| `retrieval` | `plan_cypher`、`validate_cypher`、`execute_cypher` | 真实确定性规划 Agent；独立选择受控计划，Guard 和只读仓储仍由工作流下游执行 |
+| `retrieval` | `plan_cypher`、`validate_cypher`、`execute_cypher`、`retrieve_observe` | 真实受控闭环 Agent；选择计划、观察校验/执行结果并决定重规划、回答、无依据或安全终止 |
 | `answer` | `answer_from_graph`、`direct_answer` | 图谱回答和直接回答通过角色对象调用模型，失败时使用证据化降级 |
 | `evidence_audit` | `verify_answer`、`clarify`、`no_evidence`、`safe_fail`、`finish` | 真实确定性 Agent；核对全部本轮证据并使用证据化回退，其余阶段仍由工作流收口 |
 
-该注册表提供重复 Agent、重复阶段和未知阶段的明确错误。`RetrievalAgent` 仅接收问题、已链接实体、Schema、计划尝试状态和受限模型回退生成器，不持有 Cypher Guard 或仓储，不能自行执行查询。SSE `stage` 事件携带阶段对应的 `agent`，`plan_cypher` 阶段另外携带稳定的 `plan_kind` 和中文 `plan_label`；审核完成后另有 `audit` 事件。当前 LangGraph 仍是 16 个固定节点，不是独立 Agent 子图或动态调度系统。
+该注册表提供重复 Agent、重复阶段和未知阶段的明确错误。`RetrievalAgent` 接收问题、已链接实体、Schema、计划尝试状态和受限模型回退生成器，并通过 `retrieve_observe` 消费工具结果；它不持有 Cypher Guard 或仓储，不能自行执行查询。SSE `stage` 事件携带阶段对应的 `agent`，`plan_cypher` 阶段另外携带稳定的 `plan_kind` 和中文 `plan_label`，`retrieve_observe` 公开当前步数、下一步决策和稳定原因码；审核完成后另有 `audit` 事件。当前 LangGraph 是 17 个固定节点，已经具备主图内的受控 Agent 循环，但不是独立 Agent 子图或动态调度系统。
 
 ### 4.3 路由
 
@@ -150,10 +155,12 @@ flowchart TD
     Plan -->|复杂问题| Text2Cypher[Schema 约束 Text2Cypher]
     Text2Cypher --> Validate
     Validate -->|通过| Execute[只读执行]
-    Validate -->|失败且次数小于 3| Text2Cypher
-    Validate -->|失败且次数达到 3| SafeFail[安全失败]
-    Execute -->|无结果| NoEvidence[说明图谱无依据]
-    Execute -->|有结果| Answer[流式生成带证据回答]
+    Validate --> Observe[Agent 观察结果]
+    Execute --> Observe
+    Observe -->|重规划且未超预算| Plan
+    Observe -->|耗尽预算| SafeFail[安全失败]
+    Observe -->|无结果| NoEvidence[说明图谱无依据]
+    Observe -->|有结果| Answer[流式生成带证据回答]
     Answer --> Verify[校验答案与证据]
     Direct --> End([END])
     Clarify --> End
@@ -162,7 +169,7 @@ flowchart TD
     Verify --> End
 ```
 
-“重试上限 3”表示首次生成加最多两次重试。计数必须由固定状态字段控制，不能依赖递归自然结束。
+“重试上限 3”表示 Agent 最多执行三次计划/工具观察循环。计数由 `retrieval_steps` 固定状态字段控制；每次观察产生稳定 `next_action` 和 `reason_code`，不能依赖递归自然结束。
 
 ## 5. 意图识别
 
@@ -210,6 +217,8 @@ M1 使用 Python 标准库实现字符串相似度。当前 M3 扩展增加本�
 5. 最终仍按 `(label, name)` 去重并执行每标签数量限制。
 
 向量索引只召回实体，不决定事实答案。事实仍必须来自实际 Cypher 查询和证据校验。
+
+具体名称形态的 Herb、Formula 和 Source 不允许仅凭 semantic 候选建立链接；精确名称、别名和高置信 fuzzy 仍按原顺序工作。未解析代词不会进入 semantic 实体链接，避免把“它归经是什么”误链接到《本经》等文献名称。该边界只过滤高风险名称型 semantic 候选，不改变 Effect、Disease、Symptom 的描述性同义召回。
 
 本地 `models/bge-large-zh-v1.5` 生成的完整 FAISS 索引缓存到 `.cache/graph_qa/faiss/`。实体集合或模型路径变化时缓存键变化并自动重建。
 
@@ -285,7 +294,7 @@ M1 使用 Python 标准库实现字符串相似度。当前 M3 扩展增加本�
 - 不把模型常识伪装成图谱事实。
 - 不输出模型隐藏推理过程。
 
-如果查询成功但无结果，返回固定语义的“当前图谱没有找到相关依据”，不调用模型猜测答案。
+如果查询成功但无结果，返回固定语义的“已识别到相关图谱实体，但当前图谱没有找到足以回答该问题的依据”，不调用模型猜测答案。未确认实体则进入澄清路径并要求用户补充具体名称。正常无依据保持业务成功响应、`grounded=false` 和 `verification=null`；查询结果无法构造合法证据时仍返回 `NO_GRAPH_EVIDENCE` 完整性错误。
 
 回答生成后由 `EvidenceAuditAgent` 逐项检查回答是否覆盖本轮全部关系对象、属性值、聚合描述和路径节点；未完整覆盖或回答为空时替换为基于证据的简化回答。审核结果同时记录已核对/已匹配数量、缺失来源数和是否使用回退，并通过 API、SSE、CLI 和 Streamlit 展示。该检查是确定性文本覆盖，不宣称完成语义等价或医学事实审核。关系多来源会合并到同一条证据中展示。
 

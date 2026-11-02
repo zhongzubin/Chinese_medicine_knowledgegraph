@@ -138,3 +138,16 @@ output/playwright/retrieval-agent-multi-hop-2026-11-01.png
 - 独立 Agent 子图或动态调度。
 
 检索规划已具备独立、可序列化、可单元测试的输入输出契约，同时保留现有安全、只读和证据边界。
+
+## 7. 最小 Agent 闭环补充
+
+后续补充了主图内的受控 Agent 循环：
+
+- 新增 `retrieve_observe` 节点。
+- Agent 观察校验是否通过、是否执行出错、是否发生属性空回退、是否已有证据和返回行数。
+- 观察结果映射为 `replan`、`answer_from_graph`、`no_evidence`、`safe_fail` 或 `finish`。
+- 每个循环步骤有稳定 `reason_code`，最多三次。
+- SSE 和 Streamlit 展示步数、决策和原因码，不暴露隐藏推理。
+- Guard、`EXPLAIN`、只读仓储和证据审核职责未改变。
+
+相关与全量测试最终为 `227 passed, 5 skipped`。当前仍是固定主图内的单 Agent 闭环，不是独立 Agent 子图或动态多 Agent 调度。

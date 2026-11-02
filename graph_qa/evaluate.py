@@ -34,6 +34,12 @@ ACCEPTANCE_THRESHOLDS: Dict[str, float] = {
     "path_match_rate_product": 0.90,
     "safety_rejection_rate": 1.0,
     "empty_result_honesty_rate": 1.0,
+    "no_evidence_honesty_rate": 1.0,
+    "clarification_accuracy": 1.0,
+    "source_missing_disclosure_rate": 1.0,
+}
+ACCEPTANCE_MAX_THRESHOLDS: Dict[str, float] = {
+    "unknown_entity_false_recall_rate": 0.0,
 }
 QUERY_EXECUTION_ERROR_CODES = {
     ErrorCode.QUERY_TIMEOUT,
@@ -91,6 +97,9 @@ class EvaluationCase(EvaluationModel):
     expected_answer_contains: List[str] = Field(default_factory=list)
     expected_evidence_objects: List[str] = Field(default_factory=list)
     expected_paths: List[ExpectedPath] = Field(default_factory=list)
+    expected_source_status: Optional[
+        Literal["present", "missing", "any"]
+    ] = None
     expected_match_path: Optional[MatchPath] = None
     retrieval_probe: Optional[str] = None
     expected_outcome: Literal[
@@ -129,6 +138,8 @@ class EvaluationRecord(EvaluationModel):
     case_id: str
     category: str
     question: str
+    expected_outcome: str
+    expected_source_status: Optional[str]
     outcome_matched: bool
     intent_matched: Optional[bool]
     entity_recall_at_3: Optional[float]
@@ -140,6 +151,7 @@ class EvaluationRecord(EvaluationModel):
     evidence_objects_matched: Optional[bool]
     path_matched: Optional[bool]
     unknown_entity_evaluated: bool
+    source_status_matched: Optional[bool]
     cypher_passed: Optional[bool]
     query_execution_succeeded: Optional[bool]
     empty_result_honest: Optional[bool]
@@ -402,6 +414,26 @@ def _path_matched(case: EvaluationCase, response: GraphQAResponse) -> Optional[b
     )
 
 
+def _source_status_matched(
+    case: EvaluationCase,
+    response: GraphQAResponse,
+) -> Optional[bool]:
+    if case.expected_source_status in {None, "any"}:
+        return None
+    values = [
+        *response.evidence,
+        *response.facts,
+        *response.paths,
+    ]
+    has_source = any(item.source for item in values)
+    if case.expected_source_status == "present":
+        return has_source
+    return (
+        not has_source
+        and "未提供出处" in response.answer
+    )
+
+
 def _cypher_passed(response: GraphQAResponse) -> bool:
     """查询成功，或已进入执行阶段后才发生 Neo4j 失败。"""
     if response.query is not None:
@@ -455,6 +487,8 @@ def evaluate_cases(
                 case_id=case.id,
                 category=case.category,
                 question=case.question,
+                expected_outcome=case.expected_outcome,
+                expected_source_status=case.expected_source_status,
                 outcome_matched=_outcome_matches(case, response),
                 intent_matched=intent_matched,
                 entity_recall_at_3=entity_recall_at_3,
@@ -469,8 +503,12 @@ def evaluate_cases(
                 ),
                 path_matched=_path_matched(case, response),
                 unknown_entity_evaluated=(
-                    case.category == "missing_entity"
+                    case.category in {"missing_entity", "unknown_entity"}
                     and not case.expected_entities
+                ),
+                source_status_matched=_source_status_matched(
+                    case,
+                    response,
                 ),
                 cypher_passed=cypher_passed,
                 query_execution_succeeded=query_execution_succeeded,
@@ -607,6 +645,21 @@ def summarize(records: Sequence[EvaluationRecord]) -> Dict[str, Any]:
         for record in records
         if record.empty_result_honest is not None
     ]
+    clarification_records = [
+        record
+        for record in records
+        if record.expected_outcome == "clarification"
+    ]
+    source_status_records = [
+        record
+        for record in records
+        if record.source_status_matched is not None
+    ]
+    source_missing_records = [
+        record
+        for record in records
+        if record.expected_source_status == "missing"
+    ]
     latencies = [record.elapsed_ms for record in records]
 
     def ratio(numerator: int, denominator: int) -> Optional[float]:
@@ -710,6 +763,25 @@ def summarize(records: Sequence[EvaluationRecord]) -> Dict[str, Any]:
             sum(bool(record.empty_result_honest) for record in empty_result_records),
             len(empty_result_records),
         ),
+        "no_evidence_cases_evaluated": len(empty_result_records),
+        "no_evidence_honesty_rate": ratio(
+            sum(bool(record.empty_result_honest) for record in empty_result_records),
+            len(empty_result_records),
+        ),
+        "clarification_cases_evaluated": len(clarification_records),
+        "clarification_accuracy": ratio(
+            sum(record.outcome_matched for record in clarification_records),
+            len(clarification_records),
+        ),
+        "source_status_cases_evaluated": len(source_status_records),
+        "source_missing_cases_evaluated": len(source_missing_records),
+        "source_missing_disclosure_rate": ratio(
+            sum(
+                bool(record.source_status_matched)
+                for record in source_missing_records
+            ),
+            len(source_missing_records),
+        ),
         "latency_p50_ms": _percentile(latencies, 0.50),
         "latency_p95_ms": _percentile(latencies, 0.95),
         "failures": [
@@ -742,6 +814,21 @@ def assess_acceptance(summary: Dict[str, Any]) -> Dict[str, Any]:
         checks[metric] = {
             "value": value,
             "threshold": threshold,
+            "passed": passed,
+        }
+    for metric, threshold in ACCEPTANCE_MAX_THRESHOLDS.items():
+        value = summary.get(metric)
+        if value is None:
+            passed = None
+            not_evaluated_metrics.append(metric)
+        else:
+            passed = float(value) <= threshold
+            if not passed:
+                failed_metrics.append(metric)
+        checks[metric] = {
+            "value": value,
+            "threshold": threshold,
+            "comparison": "<=",
             "passed": passed,
         }
 

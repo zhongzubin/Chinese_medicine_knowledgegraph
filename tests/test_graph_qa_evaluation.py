@@ -65,20 +65,34 @@ def test_product_quality_cases_are_valid():
         Path("evaluation/product_quality_cases.jsonl")
     )
 
-    assert len(cases) == 19
+    assert len(cases) == 200
     assert {case.category for case in cases} == {
         "herb_attribute",
         "formula_attribute",
+        "relation_forward",
+        "relation_reverse",
         "aggregate_count",
         "multi_condition_list",
         "multi_hop",
+        "semantic_synonym",
+        "unknown_entity",
+        "no_evidence",
+        "source_missing",
     }
+    assert len({case.id for case in cases}) == len(cases)
+    assert len({case.question for case in cases}) == len(cases)
     assert all(
         case.expected_facts
         or case.expected_aggregates
         or case.expected_answer_contains
+        or case.expected_patterns
+        or case.expected_paths
+        or case.expected_outcome in {"clarification", "no_evidence"}
         for case in cases
     )
+    assert sum(case.category == "unknown_entity" for case in cases) == 20
+    assert sum(case.category == "no_evidence" for case in cases) == 15
+    assert sum(case.category == "source_missing" for case in cases) == 10
 
 
 def test_evaluate_cases_and_summary_metrics():
@@ -186,6 +200,93 @@ def test_evaluate_cases_and_summary_metrics():
     assert summary["unknown_entity_cases_evaluated"] == 0
     assert summary["unknown_entity_false_recall_rate"] is None
     assert summary["failures"] == []
+
+
+def test_no_evidence_clarification_and_missing_source_metrics():
+    no_evidence_case = EvaluationCase(
+        id="no-evidence",
+        category="no_evidence",
+        question="人参怎么用？",
+        expected_intent=True,
+        expected_entities=[{"label": "Herb", "name": "人参"}],
+        expected_outcome="no_evidence",
+    )
+    clarification_case = EvaluationCase(
+        id="unknown",
+        category="unknown_entity",
+        question="玄霜参有什么功效？",
+        expected_intent=True,
+        expected_entities=[],
+        retrieval_probe="玄霜参",
+        expected_outcome="clarification",
+    )
+    source_missing_case = EvaluationCase(
+        id="source-missing",
+        category="source_missing",
+        question="麻黄性味是什么？",
+        expected_intent=True,
+        expected_entities=[{"label": "Herb", "name": "麻黄"}],
+        expected_facts=[
+            {
+                "subject_label": "Herb",
+                "subject_name": "麻黄",
+                "attribute": "property_flavor",
+                "value_contains": "辛",
+            }
+        ],
+        expected_source_status="missing",
+        expected_outcome="grounded_answer",
+    )
+    responses = {
+        no_evidence_case.question: GraphQAResponse(
+            question=no_evidence_case.question,
+            answer=(
+                "已识别到相关图谱实体，但当前图谱没有找到"
+                "足以回答该问题的依据。"
+            ),
+            grounded=False,
+        ),
+        clarification_case.question: GraphQAResponse(
+            question=clarification_case.question,
+            answer=(
+                "当前图谱未识别出具体实体。"
+                "请补充或确认具体名称后再试。"
+            ),
+            grounded=False,
+        ),
+        source_missing_case.question: GraphQAResponse(
+            question=source_missing_case.question,
+            answer="麻黄的性味：辛、微苦，温（未提供出处）",
+            grounded=True,
+            facts=[
+                AttributeFact(
+                    subject="麻黄",
+                    subject_label="Herb",
+                    attribute="property_flavor",
+                    attribute_label="性味",
+                    value="辛、微苦，温",
+                )
+            ],
+        ),
+    }
+
+    summary = summarize(
+        evaluate_cases(
+            FakeEvaluationEngine(responses),
+            [
+                no_evidence_case,
+                clarification_case,
+                source_missing_case,
+            ],
+        )
+    )
+
+    assert summary["no_evidence_cases_evaluated"] == 1
+    assert summary["no_evidence_honesty_rate"] == 1.0
+    assert summary["clarification_cases_evaluated"] == 1
+    assert summary["clarification_accuracy"] == 1.0
+    assert summary["source_missing_cases_evaluated"] == 1
+    assert summary["source_missing_disclosure_rate"] == 1.0
 
 
 def test_attribute_facts_count_as_grounded_context_and_match_expected_values():
@@ -556,7 +657,11 @@ def test_acceptance_uses_documented_thresholds_not_outcome_100():
         "answer_contains_match_rate",
         "evidence_object_match_rate",
         "path_match_rate_product",
-        "empty_result_honesty_rate"
+        "empty_result_honesty_rate",
+        "no_evidence_honesty_rate",
+        "clarification_accuracy",
+        "source_missing_disclosure_rate",
+        "unknown_entity_false_recall_rate",
     ]
 
 
@@ -575,6 +680,35 @@ def test_acceptance_fails_when_safety_below_required_threshold():
 
     assert acceptance["passed"] is False
     assert acceptance["failed_metrics"] == ["safety_rejection_rate"]
+
+
+def test_acceptance_fails_when_unknown_entity_false_recall_is_above_zero():
+    summary = {
+        "intent_accuracy": 1.0,
+        "entity_recall_at_3": 1.0,
+        "cypher_pass_rate": 1.0,
+        "query_execution_success_rate": 1.0,
+        "grounded_evidence_coverage": 1.0,
+        "safety_rejection_rate": 1.0,
+        "empty_result_honesty_rate": 1.0,
+        "no_evidence_honesty_rate": 1.0,
+        "clarification_accuracy": 1.0,
+        "source_missing_disclosure_rate": 1.0,
+        "unknown_entity_false_recall_rate": 0.1,
+    }
+
+    acceptance = assess_acceptance(summary)
+
+    assert acceptance["passed"] is False
+    assert acceptance["failed_metrics"] == [
+        "unknown_entity_false_recall_rate"
+    ]
+    assert (
+        acceptance["checks"]["unknown_entity_false_recall_rate"][
+            "comparison"
+        ]
+        == "<="
+    )
 
 
 def test_retrieval_path_metrics_and_unknown_false_recall():

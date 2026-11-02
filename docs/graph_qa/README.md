@@ -75,7 +75,7 @@
 - 图谱写入、自动补图和新索引创建。
 - 面向公众的在线医疗诊断或处方服务。
 - 任意深度、任意关系组合或由模型动态规划的复杂多跳查询。
-- 200 条以上独立产品问题集和更大规模人工事实审核。
+- 更大规模人工事实审核和语义等价判断。
 - 独立 Agent 拓扑、动态调度和完全自治协作。
 
 当前本地运行以单 worker 为目标。多实例协调代码保留，但本地 BGE-large 会为每个 worker 重复占用模型内存，暂不作为本轮部署目标。
@@ -107,6 +107,7 @@ flowchart LR
 [product-quality-roadmap.md](product-quality-roadmap.md)。
 
 完整架构见 [architecture.md](architecture.md)，数据与接口契约见 [contracts.md](contracts.md)，安全及评测规则见 [security-and-evaluation.md](security-and-evaluation.md)。
+当前实现总览图见 [project-architecture.md](project-architecture.md)。
 
 M1 实现中遇到的问题、修复过程和遗留限制记录在 [implementation-challenges.md](implementation-challenges.md)。
 
@@ -120,23 +121,20 @@ M1 实现中遇到的问题、修复过程和遗留限制记录在 [implementati
 | M3 会话与流式 | 5 轮会话、FAISS 混合召回和 SSE | M2 完成 | 已完成本地 BGE-large、真实 FAISS、Redis 会话和 SSE 验证 |
 | M4 交互界面 | Streamlit 进度与回答分栏 | M3 完成 | 已完成页面实测和安全输出 |
 | M5 可选增强 | 微调与模型部署增强 | 基线证明存在明确收益 | 离线评测优于基线，可回滚 |
-| Q1 专业问答质量 v1 | 属性和关系统一证据、多轮上下文、答案审核、受控查询扩展 | 当前产品方向已确认 | 首轮完成；多条件列表和四种白名单两跳已落地，200 条评测待扩展 |
-| Q2 Agent 基础层 | 角色边界、阶段注册、检索规划和证据审核 | Q1 契约稳定 | 检索规划与证据审核 Agent 已完成；独立拓扑和动态调度待演进 |
+| Q1 专业问答质量 v1 | 属性和关系统一证据、多轮上下文、答案审核、受控查询扩展 | 当前产品方向已确认 | 已完成；200 条产品集和未知实体/无依据边界通过 |
+| Q2 Agent 基础层 | 角色边界、阶段注册、受控 Agent 循环和证据审核 | Q1 契约稳定 | 检索 Agent 闭环和证据审核已完成；独立拓扑和动态调度待演进 |
 
 ## 当前验证状态
 
-- 全量 pytest：213 passed、5 skipped。
-- 黄金集：120 条；完整工作流 outcome 通过 117/120。
-- 纯召回 Recall@3：100%；完整工作流实体 Recall@3：98.89%。
-- 产品固定集：19/19 grounded。
-- 属性产品集：10/10，属性事实匹配率 100%。
-- 聚合产品集：6/6，单跳和多条件计数匹配率 100%。
-- 多条件结果列表：1/1，答案包含和结果对象匹配率 100%。
-- 受控两跳：2/2，路径匹配率 100%。
-- 产品固定集 P50/P95：105/624 ms。
-- 回答审核覆盖率：19/19，逐项证据覆盖 19/19。
-- 多轮固定集：20 组 62 轮，outcome 和实体匹配均为 100%。
-- 产品集规划类型：属性 10、聚合 6、多条件列表 1、受控两跳 2。
+- 全量 pytest：227 passed、5 skipped。
+- 黄金集：120 条；完整工作流 outcome 通过 119/120。
+- 纯召回 Recall@3：100%；完整工作流实体 Recall@3：97.78%。
+- 产品固定集：200/200 outcome 通过，接受门禁通过。
+- 未知实体误召回率：0%，20 条。
+- 无依据诚实率：100%，15 条。
+- 无来源披露率：100%，10 条指定用例。
+- 回答审核和 grounded 证据覆盖率：100%。
+- 多轮固定集：20 组、62 轮，outcome 和实体匹配均为 100%。
 - 初始口径见 [实体召回路径评测报告](retrieval-evaluation-2026-10-28.md)。
 - 最新修复结果见 [实体边界与 grounded 修复记录](retrieval-boundary-fix-2026-10-28.md)。
 - 验收门槛与退出码见 [黄金集验收门槛说明](evaluation-acceptance-2026-10-28.md)。
@@ -153,19 +151,21 @@ M1 实现中遇到的问题、修复过程和遗留限制记录在 [implementati
 3. 多条件结果列表已实现，确定性返回同时满足全部条件的实体及关系证据。
 4. 四种 Schema 白名单两跳路径已实现，并返回逐跳 `PathEvidence`。
 5. Agent 基础层已启动：六个角色完成注册，四个模型调用角色已接入，所有 LangGraph 阶段映射到唯一 Agent。
-6. `retrieval` 已升级为真实、可测试的确定性检索规划 Agent，并保持 Guard、只读仓储和证据校验职责不变。
+6. `retrieval` 已升级为真实、可测试的受控 Agent，具备 `plan → act → observe → replan` 闭环，并保持 Guard、只读仓储和证据校验职责不变。
 7. `evidence_audit` 已从声明式角色升级为真实确定性 Agent，支持通过/回退、逐项覆盖计数和缺失来源计数。
 8. 回答校验通过 API `verification`、SSE `audit`、CLI 和 Streamlit“回答校验”区域向用户展示。
 9. Redis 5 轮会话已通过 20 组、62 轮固定集。
 10. 已增加首轮答案支持检查；更完整的人工事实审核待扩展。
-11. 产品集已从 16 条扩展到 19 条，200 条以上产品集仍待扩展。
+11. 产品集已扩展到 200 条，覆盖属性、正向/反向关系、聚合、多条件、多跳、semantic、未知实体、无依据和无来源。
 
 完整阶段、边界和验收计划见
 [product-quality-roadmap.md](product-quality-roadmap.md)。
-属性、一跳正向/反向、单跳/多条件计数、多条件结果列表、四种白名单两跳和多轮固定集已经落地；任意深度多跳和 200 条以上独立评测仍待完成。详细结果见
+属性、一跳正向/反向、单跳/多条件计数、多条件结果列表、四种白名单两跳、200 条产品集和未知实体/无依据边界已经落地；任意深度多跳仍待完成。详细结果见
 [product-quality-validation-2026-10-31.md](product-quality-validation-2026-10-31.md)。
 检索规划 Agent 的实现与最终验证见
 [retrieval-agent-validation-2026-11-01.md](retrieval-agent-validation-2026-11-01.md)。
+质量边界与 200 条产品集验证见
+[quality-boundary-validation-2026-11-01.md](quality-boundary-validation-2026-11-01.md)。
 
 ## M1 回归 DoD
 

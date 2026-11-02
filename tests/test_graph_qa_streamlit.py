@@ -1,7 +1,14 @@
 # -*- coding: utf-8 -*-
 """Streamlit SSE 解析测试。"""
 
-from graph_qa.streamlit_app import _stage_display_label, parse_sse_lines
+from graph_qa.streamlit_app import (
+    _compact_session_id,
+    _evidence_tab_specs,
+    _progress_timeline_html,
+    _stage_display_label,
+    _verification_ratio,
+    parse_sse_lines,
+)
 
 
 def test_parse_sse_lines_handles_multiple_events_and_utf8():
@@ -120,6 +127,59 @@ def test_stage_display_label_only_adds_safe_retrieval_plan_type():
             "plan_label": "不应显示",
         }
     )
+    observe_label = _stage_display_label(
+        {
+            "stage": "retrieve_observe",
+            "label": "观察检索结果并决定下一步",
+            "decision": "replan",
+            "reason_code": "VALIDATION_RETRY",
+        }
+    )
 
     assert plan_label == "生成图谱查询（受控两跳）"
     assert generic_label == "校验查询安全"
+    assert observe_label == "观察检索结果并决定下一步（重新规划）"
+
+
+def test_compact_session_id_never_exposes_full_identifier():
+    assert _compact_session_id(None) == "尚未建立会话"
+    assert _compact_session_id(
+        "12345678-90ab-cdef-1234-567890abcdef"
+    ) == "会话 · 12345678"
+
+
+def test_evidence_tab_specs_only_returns_available_groups():
+    specs = _evidence_tab_specs(
+        evidence=[{"subject": "麻黄"}],
+        facts=[{"subject": "麻黄"}, {"subject": "桂枝"}],
+        aggregates=[],
+        paths=[{"root": "四君子汤"}],
+    )
+
+    assert specs == [
+        ("relations", "关系证据", 1),
+        ("facts", "属性事实", 2),
+        ("paths", "多跳路径", 1),
+    ]
+
+
+def test_verification_ratio_handles_empty_and_complete_coverage():
+    assert _verification_ratio(None) == 0.0
+    assert _verification_ratio({"checked_items": 0}) == 0.0
+    assert _verification_ratio(
+        {"checked_items": 4, "matched_items": 3}
+    ) == 0.75
+    assert _verification_ratio(
+        {"checked_items": 3, "matched_items": 5}
+    ) == 1.0
+
+
+def test_progress_timeline_escapes_public_stage_labels():
+    markup = _progress_timeline_html(
+        ["匹配实体", "<script>alert(1)</script>"],
+        running=True,
+    )
+
+    assert "匹配实体" in markup
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in markup
+    assert "<script>" not in markup
