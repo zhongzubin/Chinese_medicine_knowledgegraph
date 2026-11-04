@@ -36,7 +36,7 @@
 | 白名单两跳 | 10 |
 | semantic 同义正例 | 25 |
 | 未知实体 | 20 |
-| 已知实体但无证据 | 15 |
+| 已知实体但无证据 | xxxxxxxxxx1 1docs/graph_qa/assets/project-architecture.pngtext |
 | 图谱无来源披露 | 10 |
 | 合计 | 200 |
 

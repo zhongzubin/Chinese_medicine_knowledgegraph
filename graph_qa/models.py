@@ -9,41 +9,41 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-EntityLabel = Literal["Herb", "Formula", "Disease", "Symptom", "Effect", "Source"]
-MatchType = Literal["name", "alias", "fuzzy", "semantic"]
-AggregateDirection = Literal["outgoing", "incoming"]
+EntityLabel = Literal["Herb", "Formula", "Disease", "Symptom", "Effect", "Source"]  # 实体标签
+MatchType = Literal["name", "alias", "fuzzy", "semantic"]  # 匹配类型
+AggregateDirection = Literal["outgoing", "incoming"]  # 聚合方向
 RetrievalPlanKind = Literal[
-    "controlled_multi_hop",
-    "controlled_attribute",
-    "controlled_aggregate",
-    "controlled_multi_condition_list",
-    "controlled_relationship",
-    "schema_constrained_cypher",
-    "rejected",
+    "controlled_multi_hop", # 控制的多跳查询
+    "controlled_attribute",  # 控制的属性查询
+    "controlled_aggregate",  # 控制的聚合查询
+    "controlled_multi_condition_list",  # 控制的多条件列表查询
+    "controlled_relationship",  # 控制的关系查询
+    "schema_constrained_cypher",  # 模式约束的Cypher查询
+    "rejected",  # 拒绝的查询
 ]
 
 MEDICAL_DISCLAIMER = "以上内容仅供中医药知识参考，不能替代专业医疗诊断和治疗。"
 
 
 class ErrorCode(str, Enum):
-    INVALID_REQUEST = "INVALID_REQUEST"
-    UNSAFE_REQUEST = "UNSAFE_REQUEST"
-    UNAUTHORIZED = "UNAUTHORIZED"
-    RATE_LIMITED = "RATE_LIMITED"
-    SERVICE_BUSY = "SERVICE_BUSY"
-    RATE_LIMIT_UNAVAILABLE = "RATE_LIMIT_UNAVAILABLE"
-    SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
-    SESSION_BUSY = "SESSION_BUSY"
-    SESSION_UNAVAILABLE = "SESSION_UNAVAILABLE"
-    CONFIG_ERROR = "CONFIG_ERROR"
-    MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
-    MODEL_OUTPUT_INVALID = "MODEL_OUTPUT_INVALID"
-    CYPHER_REJECTED = "CYPHER_REJECTED"
-    CYPHER_INVALID = "CYPHER_INVALID"
-    QUERY_TIMEOUT = "QUERY_TIMEOUT"
-    QUERY_EXECUTION_FAILED = "QUERY_EXECUTION_FAILED"
-    NO_GRAPH_EVIDENCE = "NO_GRAPH_EVIDENCE"
-    INTERNAL_ERROR = "INTERNAL_ERROR"
+    INVALID_REQUEST = "INVALID_REQUEST"     # 请求无效
+    UNSAFE_REQUEST = "UNSAFE_REQUEST"     # 请求不安全
+    UNAUTHORIZED = "UNAUTHORIZED"     # 未授权
+    RATE_LIMITED = "RATE_LIMITED"     # 请求频率限制
+    SERVICE_BUSY = "SERVICE_BUSY"     # 服务繁忙
+    RATE_LIMIT_UNAVAILABLE = "RATE_LIMIT_UNAVAILABLE"     # 请求频率限制不可用
+    SESSION_NOT_FOUND = "SESSION_NOT_FOUND"     # 会话未找到
+    SESSION_BUSY = "SESSION_BUSY"     # 会话繁忙
+    SESSION_UNAVAILABLE = "SESSION_UNAVAILABLE"     # 会话不可用
+    CONFIG_ERROR = "CONFIG_ERROR"     # 配置错误
+    MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"     # 模型不可用
+    MODEL_OUTPUT_INVALID = "MODEL_OUTPUT_INVALID"     # 模型输出无效
+    CYPHER_REJECTED = "CYPHER_REJECTED"     # Cypher查询被拒绝
+    CYPHER_INVALID = "CYPHER_INVALID"     # Cypher查询无效
+    QUERY_TIMEOUT = "QUERY_TIMEOUT"     # 查询超时
+    QUERY_EXECUTION_FAILED = "QUERY_EXECUTION_FAILED"     # 查询执行失败
+    NO_GRAPH_EVIDENCE = "NO_GRAPH_EVIDENCE"     # 无图谱证据
+    INTERNAL_ERROR = "INTERNAL_ERROR"     # 内部错误
 
 
 class StrictModel(BaseModel):
@@ -264,13 +264,14 @@ class RetrievalPlanningResult(StrictModel):
             )
         return self
 
-
+# 查询信息
 class QueryInfo(StrictModel):
     cypher: str
     parameters: Dict[str, Any] = Field(default_factory=dict)
     plan_kind: Optional[RetrievalPlanKind] = None
 
 
+# 查询结果
 class QueryResult(StrictModel):
     cypher: str
     parameters: Dict[str, Any] = Field(default_factory=dict)
@@ -279,7 +280,7 @@ class QueryResult(StrictModel):
     elapsed_ms: int = Field(ge=0)
     limit_applied: int = Field(ge=1)
 
-
+# 证据
 class Evidence(StrictModel):
     subject: str
     subject_label: EntityLabel
@@ -288,7 +289,7 @@ class Evidence(StrictModel):
     object_label: EntityLabel
     source: Optional[str] = None
 
-
+# 属性事实
 class AttributeFact(StrictModel):
     subject: str = Field(min_length=1, max_length=100)
     subject_label: EntityLabel
@@ -297,6 +298,7 @@ class AttributeFact(StrictModel):
     value: str = Field(min_length=1, max_length=4000)
     source: Optional[str] = Field(default=None, max_length=1000)
 
+# 聚合事实
 
 class AggregateFact(StrictModel):
     anchor: str = Field(min_length=1, max_length=100)
@@ -307,7 +309,7 @@ class AggregateFact(StrictModel):
     count: int = Field(ge=0)
     description: str = Field(min_length=1, max_length=160)
 
-
+# 路径证据
 class PathEvidence(StrictModel):
     root: str = Field(min_length=1, max_length=100)
     root_label: EntityLabel
@@ -319,7 +321,7 @@ class PathEvidence(StrictModel):
     target_label: EntityLabel
     source: Optional[str] = Field(default=None, max_length=1000)
 
-
+# 答案验证
 class AnswerVerification(StrictModel):
     status: Literal["passed", "fallback"]
     agent: Literal["evidence_audit"] = "evidence_audit"
@@ -333,12 +335,12 @@ class AnswerVerification(StrictModel):
     fallback_used: bool
     message: str = Field(min_length=1, max_length=300)
 
-
+# 错误信息
 class ErrorInfo(StrictModel):
     code: ErrorCode
     message: str
 
-
+# 图谱查询响应
 class GraphQAResponse(StrictModel):
     schema_version: Literal["1.0"] = "1.0"
     request_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -359,6 +361,7 @@ class GraphQAResponse(StrictModel):
     rewritten_question: Optional[str] = None
 
 
+# 图谱查询流事件
 class GraphQAStreamEvent(StrictModel):
     event: Literal[
         "stage",
