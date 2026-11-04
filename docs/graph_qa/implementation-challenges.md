@@ -393,7 +393,7 @@ Neo4j 只返回属性键和关系类型，不自动提供领域语义；同名�
 
 **验证**
 
-缓存文件约 43MB；缓存命中启动约 6.6 秒，FAISS 查询约 0.06 秒。
+xxxxxxxxxx9 1继续开发 D:\code\github-clong\Chinese_medicine_knowledgegraph。2先读取 AGENTS.md、docs/graph_qa/HANDOFF.md、local-demo.md 和3product-quality-roadmap.md，再检查 git status。4当前不实现内容生成，也不以多 worker 为运行目标。5当前主线是查询契约已稳定的前提下推进 Agent 演进：6保持属性和关系证据、多轮上下文、来源披露和固定集评测不回归，7检索规划、证据审核 Agent、未知实体边界和 200 条产品集已完成；下一阶段重点是最终多轮全量、人工事实复核，然后进入独立 Agent 拓扑或动态调度。8内部试用和公开上线工程化后续再做。9开发前按 AGENTS.md 给出方案并等待确认。text
 
 ### 2.16 短实体截获与无关证据 grounded
 
