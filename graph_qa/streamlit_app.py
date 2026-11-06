@@ -30,6 +30,15 @@ PLAN_LABELS = {
     "rejected": "规划校验未通过",
 }
 
+RELATION_LABELS = {
+    "TREATS_DISEASE": "治疗疾病",
+    "ALLEVIATES_SYMPTOM": "缓解症状",
+    "HAS_EFFECT": "具有功效",
+    "HAS_INGREDIENT": "包含",
+    "HAS_SYMPTOM": "包含症状",
+    "FROM_SOURCE": "来源文献",
+}
+
 ENTITY_LABELS = {
     "Herb": "药材",
     "Formula": "方剂",
@@ -38,6 +47,8 @@ ENTITY_LABELS = {
     "Effect": "功效",
     "Source": "文献",
 }
+
+LOCAL_HISTORY_LIMIT = 5
 
 APP_CSS = """
 <style>
@@ -248,6 +259,26 @@ APP_CSS = """
     font-size: 1rem;
     font-weight: 650;
     line-height: 1.65;
+}
+
+.kg-history-intro {
+    margin: 1.5rem 0 0.65rem;
+    color: var(--kg-muted);
+    font-size: 0.82rem;
+    line-height: 1.6;
+}
+
+.kg-followup-title {
+    margin: 1rem 0 0.25rem;
+    color: var(--kg-green-dark);
+    font-size: 0.84rem;
+    font-weight: 750;
+}
+
+.kg-followup-caption {
+    margin-bottom: 0.55rem;
+    color: var(--kg-muted);
+    font-size: 0.76rem;
 }
 
 .kg-panel-heading {
@@ -724,6 +755,12 @@ button[data-baseweb="tab"][aria-selected="true"] {
     color: var(--kg-green-dark);
 }
 
+[data-testid="stExpander"] {
+    border-color: rgba(31, 107, 84, 0.12);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.58);
+}
+
 @media (max-width: 760px) {
     .block-container {
         padding-top: 1rem;
@@ -736,9 +773,9 @@ button[data-baseweb="tab"][aria-selected="true"] {
         border-radius: 20px;
     }
     .kg-title {
-        font-size: 2rem;
+        font-size: clamp(1.55rem, 7.2vw, 1.75rem) !important;
         letter-spacing: -0.05em;
-        white-space: nowrap;
+        line-height: 1.18;
     }
     .kg-subtitle {
         font-size: 0.9rem;
@@ -759,6 +796,9 @@ button[data-baseweb="tab"][aria-selected="true"] {
     }
     .kg-evidence-edge {
         text-align: left;
+    }
+    .kg-evidence-list {
+        max-height: none;
     }
 }
 </style>
@@ -877,6 +917,79 @@ def _plan_label(plan_kind: Optional[str]) -> Optional[str]:
     return PLAN_LABELS.get(plan_kind, plan_kind)
 
 
+def _relation_label(value: Any) -> str:
+    text = str(value or "").strip()
+    return RELATION_LABELS.get(text, text or "关联")
+
+
+def _bounded_history(
+    turns: Sequence[dict],
+    result: dict,
+    *,
+    replace_latest: bool = False,
+) -> list[dict]:
+    updated = list(turns)
+    if replace_latest and updated:
+        updated[-1] = result
+    else:
+        updated.append(result)
+    return updated[-LOCAL_HISTORY_LIMIT:]
+
+
+def _follow_up_questions(result: dict) -> list[str]:
+    entities = result.get("linked_entities") or []
+    if not entities:
+        return []
+
+    current_question = str(result.get("question", "")).strip()
+    entity = entities[0]
+    if not isinstance(entity, dict):
+        return []
+    name = str(entity.get("name", "")).strip()
+    label = str(entity.get("label", "")).strip()
+    if not name:
+        return []
+
+    if label == "Herb":
+        candidates = [
+            f"{name}有哪些禁忌？",
+            f"含{name}的方剂有哪些？",
+            f"{name}的性味归经是什么？",
+        ]
+    elif label == "Formula":
+        candidates = [
+            f"{name}由哪些药材组成？",
+            f"{name}有什么功效？",
+            f"{name}出自什么文献？",
+        ]
+    elif label == "Disease":
+        candidates = [
+            f"{name}有哪些症状？",
+            f"哪些药材可以治疗{name}？",
+            f"哪些方剂可以治疗{name}？",
+        ]
+    elif label == "Symptom":
+        candidates = [
+            f"哪些药材可以缓解{name}？",
+            f"哪些方剂可以缓解{name}？",
+        ]
+    else:
+        candidates = []
+
+    return [
+        question
+        for question in candidates
+        if question != current_question
+    ][:3]
+
+
+def _turn_evidence_count(result: dict) -> int:
+    return sum(
+        len(result.get(key, []))
+        for key in ("evidence", "facts", "aggregates", "paths")
+    )
+
+
 def _progress_timeline_html(
     labels: Sequence[str],
     *,
@@ -911,10 +1024,15 @@ def _render_status_bar(
     session_id: Optional[str],
     api_url: str,
     api_key: str,
+    turn_count: int = 0,
 ) -> None:
     info_column, action_column = st.columns([5.2, 1.05])
     with info_column:
         session_label = html.escape(_compact_session_id(session_id))
+        history_label = html.escape(
+            f"已记录 {min(turn_count, LOCAL_HISTORY_LIMIT)}/"
+            f"{LOCAL_HISTORY_LIMIT} 轮"
+        )
         st.markdown(
             (
                 '<div class="kg-status-strip">'
@@ -923,38 +1041,57 @@ def _render_status_bar(
                 '<span class="kg-chip"><span class="kg-chip-dot"></span>'
                 "证据审核</span>"
                 '<span class="kg-chip"><span class="kg-chip-dot"></span>'
-                "最近 5 轮会话</span>"
+                f"{history_label}</span>"
                 f'<span class="kg-session">{session_label}</span>'
                 "</div>"
             ),
             unsafe_allow_html=True,
         )
     with action_column:
-        if st.button(
+        if st.session_state.get("confirm_clear"):
+            if st.button(
+                "确认清空",
+                key="confirm_clear_session",
+                use_container_width=True,
+                type="primary",
+            ):
+                if session_id:
+                    try:
+                        requests.delete(
+                            f"{api_url}/api/v1/sessions/{session_id}",
+                            headers={"X-API-Key": api_key},
+                            timeout=10,
+                        )
+                    except requests.RequestException:
+                        st.session_state.flash_message = (
+                            "本地页面已重置，但未能确认服务端会话已经删除。"
+                        )
+                _reset_local_conversation()
+                st.rerun()
+            if st.button(
+                "取消",
+                key="cancel_clear_session",
+                use_container_width=True,
+            ):
+                st.session_state.confirm_clear = False
+                st.rerun()
+        elif st.button(
             "清空当前会话",
+            key="request_clear_session",
             use_container_width=True,
             disabled=not bool(session_id),
         ):
-            if session_id:
-                try:
-                    requests.delete(
-                        f"{api_url}/api/v1/sessions/{session_id}",
-                        headers={"X-API-Key": api_key},
-                        timeout=10,
-                    )
-                except requests.RequestException:
-                    st.session_state.flash_message = (
-                        "本地页面已重置，但未能确认服务端会话已经删除。"
-                    )
-            _reset_local_conversation()
+            st.session_state.confirm_clear = True
             st.rerun()
 
 
 def _reset_local_conversation() -> None:
     st.session_state.session_id = None
     st.session_state.progress_labels = []
-    st.session_state.last_result = None
+    st.session_state.conversation_history = []
     st.session_state.pending_question = None
+    st.session_state.pending_mode = "new"
+    st.session_state.confirm_clear = False
 
 
 def _render_question_card(question: str) -> None:
@@ -1095,6 +1232,9 @@ def _run_query(
         "question": question,
         "answer": "",
         "grounded": False,
+        "request_id": None,
+        "rewritten_question": None,
+        "linked_entities": [],
         "progress_labels": [],
         "evidence": [],
         "facts": [],
@@ -1176,6 +1316,14 @@ def _run_query(
                     )
                 elif event_name == "done":
                     done_response = event_data.get("response", {}) or {}
+                    result["request_id"] = done_response.get("request_id")
+                    result["rewritten_question"] = done_response.get(
+                        "rewritten_question"
+                    )
+                    result["linked_entities"] = done_response.get(
+                        "linked_entities",
+                        [],
+                    )
                     result["session_id"] = done_response.get(
                         "session_id",
                         result["session_id"],
@@ -1263,7 +1411,7 @@ def _render_relation_evidence(items: Sequence[dict]) -> None:
             f'<span class="kg-evidence-label">{_entity_label(item.get("subject_label", ""))}</span>'
             f'<strong class="kg-evidence-name">{html.escape(str(item.get("subject", "")))}</strong>'
             "</div>"
-            f'<div class="kg-evidence-edge">{html.escape(str(item.get("relationship", "")))} →</div>'
+            f'<div class="kg-evidence-edge">{html.escape(_relation_label(item.get("relationship")))} →</div>'
             '<div class="kg-evidence-node">'
             f'<span class="kg-evidence-label">{_entity_label(item.get("object_label", ""))}</span>'
             f'<strong class="kg-evidence-name">{html.escape(str(item.get("object", "")))}</strong>'
@@ -1322,10 +1470,10 @@ def _render_path_evidence(items: Sequence[dict]) -> None:
             '<div class="kg-path-chain">'
             f'<span class="kg-path-node">{html.escape(str(item.get("root", "")))}'
             f' · {_entity_label(item.get("root_label", ""))}</span>'
-            f'<span class="kg-path-relation">{html.escape(str(item.get("first_relationship", "")))} →</span>'
+            f'<span class="kg-path-relation">{html.escape(_relation_label(item.get("first_relationship")))} →</span>'
             f'<span class="kg-path-node">{html.escape(str(item.get("intermediate", "")))}'
             f' · {_entity_label(item.get("intermediate_label", ""))}</span>'
-            f'<span class="kg-path-relation">{html.escape(str(item.get("second_relationship", "")))} →</span>'
+            f'<span class="kg-path-relation">{html.escape(_relation_label(item.get("second_relationship")))} →</span>'
             f'<span class="kg-path-node">{html.escape(str(item.get("target", "")))}'
             f' · {_entity_label(item.get("target_label", ""))}</span>'
             "</div>"
@@ -1425,7 +1573,118 @@ def _render_audit_panel(verification: Optional[dict]) -> None:
         )
 
 
-def _render_result(result: dict) -> None:
+def _queue_question(question: str, mode: str = "new") -> None:
+    st.session_state.pending_question = question
+    st.session_state.pending_mode = mode
+
+
+def _prepare_question_edit(question: str) -> None:
+    st.session_state.question_input = question
+    st.session_state.pending_question = None
+    st.session_state.flash_message = "已载入本轮问题，可修改后重新提交。"
+
+
+def _render_linked_entities(result: dict) -> None:
+    entities = result.get("linked_entities") or []
+    labels = []
+    for entity in entities[:4]:
+        if not isinstance(entity, dict):
+            continue
+        name = str(entity.get("name", "")).strip()
+        if not name:
+            continue
+        labels.append(
+            f"{ENTITY_LABELS.get(entity.get('label'), entity.get('label', ''))}"
+            f"：{name}"
+        )
+    if labels:
+        st.caption("识别实体 · " + " · ".join(labels))
+
+
+def _render_turn_actions(result: dict, turn_index: int) -> None:
+    question = str(result.get("question", "")).strip()
+    answer = str(result.get("answer", "")).strip()
+    action_columns = st.columns(3, gap="small")
+    with action_columns[0]:
+        if answer:
+            with st.popover("复制回答", use_container_width=True):
+                st.code(answer, language="text")
+        else:
+            st.button(
+                "复制回答",
+                key=f"copy_empty_{turn_index}",
+                use_container_width=True,
+                disabled=True,
+            )
+    with action_columns[1]:
+        st.button(
+            "重新回答",
+            key=f"retry_turn_{turn_index}",
+            use_container_width=True,
+            disabled=not bool(question),
+            on_click=_queue_question,
+            args=(question, "retry"),
+        )
+    with action_columns[2]:
+        st.button(
+            "修改问题",
+            key=f"edit_turn_{turn_index}",
+            use_container_width=True,
+            disabled=not bool(question),
+            on_click=_prepare_question_edit,
+            args=(question,),
+        )
+
+
+def _render_follow_up_actions(result: dict, turn_index: int) -> None:
+    questions = _follow_up_questions(result)
+    if not questions:
+        return
+    st.markdown(
+        '<div class="kg-followup-title">继续探索当前主题</div>'
+        '<div class="kg-followup-caption">'
+        "基于本轮识别实体生成，点击即可继续追问。"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    columns = st.columns(min(2, len(questions)), gap="small")
+    for index, question in enumerate(questions):
+        with columns[index % len(columns)]:
+            st.button(
+                question,
+                key=f"followup_{turn_index}_{index}",
+                use_container_width=True,
+                on_click=_queue_question,
+                args=(question, "new"),
+            )
+
+
+def _render_history_turn(result: dict, turn_index: int) -> None:
+    question = str(result.get("question", "")).strip() or "未命名问题"
+    plan_label = _plan_label(result.get("plan_kind"))
+    evidence_count = _turn_evidence_count(result)
+    summary_parts = [f"{evidence_count} 项证据"]
+    if plan_label:
+        summary_parts.append(plan_label)
+    with st.expander(
+        f"第 {turn_index + 1} 轮 · {question}",
+        expanded=False,
+    ):
+        st.caption(" · ".join(summary_parts))
+        st.markdown(_answer_markdown(result.get("answer", "")))
+        error = result.get("error")
+        if error:
+            message = (
+                error.get("message")
+                if isinstance(error, dict)
+                else str(error)
+            )
+            st.error(message or "本轮问答处理失败。")
+        _render_linked_entities(result)
+        _render_evidence_tabs(result)
+
+
+def _render_result(result: dict, turn_index: int) -> None:
     _render_question_card(result.get("question", ""))
     error = result.get("error")
     if error:
@@ -1434,37 +1693,61 @@ def _render_result(result: dict) -> None:
     for warning in result.get("warnings", []):
         st.warning(warning)
 
-    left, right = st.columns([0.82, 1.75], gap="large")
-    with left:
-        with st.container(border=True):
-            _render_panel_heading("处理轨迹", "公开阶段")
-            st.markdown(
-                _progress_timeline_html(
-                    result.get("progress_labels", []),
-                    running=False,
-                ),
-                unsafe_allow_html=True,
-            )
-            st.caption("只公开阶段、检索策略和决策原因，不展示隐藏推理。")
-    with right:
-        with st.container(border=True):
-            _render_panel_heading("回答", "证据化输出")
-            st.markdown(
-                _answer_markdown(result.get("answer", "")),
-            )
-            st.divider()
-            _render_metrics(result)
+    with st.container(border=True):
+        _render_panel_heading("回答", "证据化输出")
+        st.markdown(
+            _answer_markdown(result.get("answer", "")),
+        )
+        _render_linked_entities(result)
+        st.divider()
+        _render_metrics(result)
+        _render_turn_actions(result, turn_index)
 
+    _render_follow_up_actions(result, turn_index)
     _render_audit_panel(result.get("verification"))
     _render_evidence_tabs(result)
+
+    with st.expander("查看本轮处理轨迹", expanded=False):
+        st.markdown(
+            _progress_timeline_html(
+                result.get("progress_labels", []),
+                running=False,
+            ),
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            "只公开处理阶段、检索策略和决策原因，不展示模型隐藏推理。"
+        )
 
     session_id = result.get("session_id")
     if session_id:
         with st.expander("会话详情"):
             st.code(session_id, language="text")
             st.caption(
-                "会话由 API Key 客户端作用域隔离，最多保留最近 5 轮。"
+                "会话由 API Key 客户端作用域隔离，"
+                f"页面和服务端均最多保留最近 {LOCAL_HISTORY_LIMIT} 轮。"
             )
+
+
+def _render_conversation(turns: Sequence[dict]) -> None:
+    if not turns:
+        _render_empty_state()
+        return
+
+    latest_index = len(turns) - 1
+    _render_result(turns[latest_index], latest_index)
+    if len(turns) <= 1:
+        return
+
+    st.markdown(
+        '<div class="kg-history-intro">'
+        "历史记录按从新到旧排列；较早的回答和证据保持折叠，"
+        "如需查看更多可逐条展开。"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    for index in range(latest_index - 1, -1, -1):
+        _render_history_turn(turns[index], index)
 
 
 def main() -> None:
@@ -1485,9 +1768,11 @@ def main() -> None:
     for key, default in (
         ("session_id", None),
         ("progress_labels", []),
-        ("last_result", None),
+        ("conversation_history", []),
         ("pending_question", None),
+        ("pending_mode", "new"),
         ("flash_message", None),
+        ("confirm_clear", False),
     ):
         if key not in st.session_state:
             st.session_state[key] = default
@@ -1498,7 +1783,12 @@ def main() -> None:
         st.error("未配置 GRAPH_QA_STREAMLIT_API_KEY。")
         return
 
-    _render_status_bar(st.session_state.session_id, api_url, api_key)
+    _render_status_bar(
+        st.session_state.session_id,
+        api_url,
+        api_key,
+        len(st.session_state.conversation_history),
+    )
     flash_message = st.session_state.pop("flash_message", None)
     if flash_message:
         st.markdown(
@@ -1508,6 +1798,7 @@ def main() -> None:
 
     typed_question, submitted = _render_question_form()
     pending_question = st.session_state.pop("pending_question", None)
+    pending_mode = st.session_state.get("pending_mode", "new")
     question = (
         typed_question
         if submitted and typed_question
@@ -1526,16 +1817,19 @@ def main() -> None:
             progress_placeholder=progress_placeholder,
             answer_placeholder=answer_placeholder,
         )
-        st.session_state.last_result = result
+        replace_latest = pending_mode == "retry"
+        st.session_state.conversation_history = _bounded_history(
+            st.session_state.conversation_history,
+            result,
+            replace_latest=replace_latest,
+        )
         st.session_state.progress_labels = result["progress_labels"]
+        st.session_state.pending_mode = "new"
         if result.get("session_id"):
             st.session_state.session_id = result["session_id"]
         st.rerun()
 
-    if st.session_state.last_result:
-        _render_result(st.session_state.last_result)
-    else:
-        _render_empty_state()
+    _render_conversation(st.session_state.conversation_history)
 
 
 if __name__ == "__main__":

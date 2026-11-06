@@ -2,10 +2,14 @@
 """Streamlit SSE 解析测试。"""
 
 from graph_qa.streamlit_app import (
+    _bounded_history,
     _compact_session_id,
     _evidence_tab_specs,
+    _follow_up_questions,
     _progress_timeline_html,
+    _relation_label,
     _stage_display_label,
+    _turn_evidence_count,
     _verification_ratio,
     parse_sse_lines,
 )
@@ -183,3 +187,65 @@ def test_progress_timeline_escapes_public_stage_labels():
     assert "匹配实体" in markup
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in markup
     assert "<script>" not in markup
+
+
+def test_relation_labels_translate_known_graph_edges():
+    assert _relation_label("HAS_INGREDIENT") == "包含"
+    assert _relation_label("HAS_EFFECT") == "具有功效"
+    assert _relation_label("UNKNOWN") == "UNKNOWN"
+    assert _relation_label(None) == "关联"
+
+
+def test_bounded_history_keeps_latest_five_turns():
+    turns = [{"question": str(index)} for index in range(5)]
+
+    updated = _bounded_history(turns, {"question": "5"})
+
+    assert [item["question"] for item in updated] == ["1", "2", "3", "4", "5"]
+
+
+def test_bounded_history_can_replace_latest_retry():
+    turns = [
+        {"question": "第一问"},
+        {"question": "第二问", "answer": "旧回答"},
+    ]
+
+    updated = _bounded_history(
+        turns,
+        {"question": "第二问", "answer": "新回答"},
+        replace_latest=True,
+    )
+
+    assert len(updated) == 2
+    assert updated[-1]["answer"] == "新回答"
+
+
+def test_follow_up_questions_use_linked_entity_and_skip_current_question():
+    result = {
+        "question": "麻黄有哪些禁忌？",
+        "linked_entities": [
+            {"label": "Herb", "name": "麻黄"},
+        ],
+    }
+
+    questions = _follow_up_questions(result)
+
+    assert questions == [
+        "含麻黄的方剂有哪些？",
+        "麻黄的性味归经是什么？",
+    ]
+
+
+def test_follow_up_questions_require_a_linked_entity():
+    assert _follow_up_questions({"linked_entities": []}) == []
+
+
+def test_turn_evidence_count_sums_all_supported_evidence_types():
+    assert _turn_evidence_count(
+        {
+            "evidence": [{}],
+            "facts": [{}, {}],
+            "aggregates": [{}],
+            "paths": [{}, {}, {}],
+        }
+    ) == 7
