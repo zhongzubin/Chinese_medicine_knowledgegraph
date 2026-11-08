@@ -416,6 +416,22 @@ uv run python -m pytest tests/ -v
 
 默认测试使用模拟的 Neo4j Driver、模型和 Redis 状态，不会发起真实外部请求。真实集成测试默认跳过，可按上文分别启用 Neo4j/模型、Redis 和 API 测试。
 
+独立人工事实审核先从实际评测结果分层抽样：
+
+```powershell
+uv run python -m graph_qa.human_fact_audit build `
+  --evaluation output/graph_qa/product-quality-200-final.json `
+  --output output/graph_qa/human-fact-audit-50.jsonl
+
+uv run python -m graph_qa.human_fact_audit summarize `
+  --reviews output/graph_qa/human-fact-audit-50.jsonl `
+  --output output/graph_qa/human-fact-audit-summary.json
+```
+
+待审核文件不包含自动期望结果。人工填写 `fact_verdict`、`unsupported_claims` 和
+`source_disclosure_correct` 后，汇总命令按事实正确率 95%、无依据断言 0、
+来源披露率 100% 判断是否通过。
+
 ## 数据与安全
 
 - `crawler/data/`、`crawler/.cache/` 和 `output/` 属于本地数据，默认不进入 Git。
@@ -433,14 +449,16 @@ uv run python -m pytest tests/ -v
 - 本地演示一键启动、停止脚本及真实浏览器前后端验收。
 - 本地 BGE-large、11,043 实体 FAISS 索引和持久化缓存。
 - 5 轮语义改写、同名异标签、只读 Cypher 和证据回答。
-- 图谱属性事实、属性/唯一关系模板和答案支持校验。
+- 图谱属性事实、属性/唯一关系模板和结构化答案支持校验。
 - 单跳关系计数和图谱聚合结果。
 - 20 组、62 轮多轮上下文固定集。
-- 全量测试 227 passed、5 skipped；真实 120 条评测 outcome 通过 119 条。
-- 纯召回 Recall@3 为 100%；完整工作流实体 Recall@3 为 97.78%。
-- 200 条产品固定集 outcome 通过率 100%，接受门禁通过。
+- 全量测试 251 passed、5 skipped；真实 120 条评测 outcome 通过 119 条。
+- 纯召回 Recall@3 为 100%；完整工作流实体 Recall@3 为 96.67%。
+- 当前 200 条产品固定集 outcome 通过率 99%，接受门禁通过；2 条 semantic
+  “清除体内热毒”用例未命中实体路径，系统均诚实返回无依据。
 - 未知实体误召回率 0%，无依据诚实率和无来源披露率均为 100%。
-- 20 组、62 轮多轮集最终全量通过，outcome 和实体匹配率均为 100%。
+- 20 组、62 轮多轮集 outcome 为 90.32%、实体匹配率为 94.74%，
+  5 个波动用例单独重跑后 15/15 轮全部通过。
 - Cypher 通过率、查询执行成功率、安全拦截率和 grounded 覆盖率均通过验收门槛。
 - 检索规划 Agent 已具备受控观察/重规划闭环，证据审核 Agent 和用户可见回答校验均已接入。
 
@@ -453,13 +471,14 @@ uv run python -m pytest tests/ -v
 
 当前已完成目标：
 
-“专业问答质量 v1”首轮已统一属性和关系证据，完成多轮上下文、答案支持检查、来源状态、固定集评测和受控检索 Agent 闭环。
+“专业问答质量 v1”首轮已统一属性和关系证据，完成多轮上下文、答案支持检查、来源状态、固定集评测和受控检索 Agent 闭环。“可信回答 v1.1”已把图谱回答升级为带证据编号的结构化 claim，审核通过前不向前端发送图谱答案，并提供 50 条人工事实审核的抽样和汇总工具。完整验证记录见
+[可信回答 v1.1 验证记录](docs/graph_qa/trustworthy-answer-v1.1-validation-2026-11-09.md)。
 
 下一阶段顺序：
 
-1. 补充 50 条独立人工事实抽检。
-2. 为回答审核增加语义等价判断和领域人工抽检。
-3. 补齐真实 Redis/API 跨实例多轮集成验收。
+1. 使用已实现工具完成 50 条独立领域人工事实审核。
+2. 补齐真实 Redis/API 跨实例多轮和 Neo4j 集成验收。
+3. 建立分阶段延迟基线，专项优化模型与追问耗时。
 4. 完成上述质量门禁后进入独立 Agent 拓扑或动态调度。
 5. 内部试用、多用户认证、监控、多 worker 和公网部署继续延后。
 

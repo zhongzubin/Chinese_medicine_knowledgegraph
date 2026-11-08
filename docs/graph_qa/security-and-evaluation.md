@@ -200,6 +200,8 @@
 | 受控多跳路径匹配率 | 返回路径每跳的起点、中间节点、关系、终点和标签均符合预期的比例 | ≥ 90% |
 | 回答审核覆盖率 | grounded 回答中包含结构化 `verification` 的比例 | 100% |
 | 逐项证据覆盖匹配率 | 原回答覆盖全部本轮关系、属性、统计和路径条目的比例 | 100% |
+| 结构化 claim 编号有效率 | claim 只引用本轮真实 `support_id` 的比例 | 100% |
+| 结构化 claim 支持率 | claim 主体、事实值、数字/单位和来源可通过引用证据核验的比例 | 100% |
 | 危险查询拦截率 | 恶意查询被拒绝的比例 | 100% |
 | 空结果诚实率 | 无证据时不伪造答案的比例 | 100% |
 
@@ -363,10 +365,24 @@
 ### 9.5 数据集扩充要求
 
 - 产品固定集已达到 200 条；后续重点是独立人工事实抽检。
+- 人工抽检使用 `graph_qa.human_fact_audit` 从实际评测结果按类别分层抽样，默认 50 条、固定随机种子。待审核文件只展示问题、回答、实体、证据和来源，不展示自动期望结果，避免审核者被生成标签锚定。
+- 审核者填写 `fact_verdict`、`unsupported_claims` 和 `source_disclosure_correct` 后，工具按事实正确率不低于 95%、无依据断言为 0、来源披露率 100% 进行汇总。
 - 现有 120 条作为关系与安全回归集保留。
 - 新增用例应覆盖 6 类实体、6 类关系、主要属性和至少 20 组多轮会话。
 - 开发过程中不得针对单条问题硬编码答案。
 - 测试集与提示词示例分离，避免泄漏和过拟合。
+
+抽检命令：
+
+```powershell
+uv run python -m graph_qa.human_fact_audit build `
+  --evaluation output/graph_qa/product-quality-200-final.json `
+  --output output/graph_qa/human-fact-audit-50.jsonl
+
+uv run python -m graph_qa.human_fact_audit summarize `
+  --reviews output/graph_qa/human-fact-audit-50.jsonl `
+  --output output/graph_qa/human-fact-audit-summary.json
+```
 - 图谱或元数据更新后，重新核对受影响的期望值。
 
 ### 9.6 产品验收不变量

@@ -409,7 +409,26 @@ PathEvidence
 
 两步节点链必须连续，每一步都必须通过 Schema 校验。`GraphQAResponse.paths` 默认空数组；任意深度、变量长度路径和模型自由规划不在当前契约内。
 
-### 4.12 回答校验
+### 4.12 结构化回答
+
+图谱回答模型不直接返回自由文本，而是返回内部结构化回答草稿：
+
+```text
+GraphAnswerDraft
+- claims: list[AnswerClaim], 1 到 50 条
+
+AnswerClaim
+- text: str
+- support_ids: list[str], 至少 1 个
+```
+
+当前关系证据按 `E1`、`E2` 编号，属性事实按 `F1`、`F2` 编号。提示词和审核器使用同一编号目录。每个 claim 只能引用本轮实际存在的编号，每个关系证据和属性事实必须至少被一个 claim 引用。
+
+claim 文本必须包含对应证据的主体和对象，或属性事实的主体和值；claim 中出现的数字、单位、否定词和文献标题必须能在其引用的事实中找到。未通过核验的回答不得作为用户答案发送，系统直接回退到确定性证据化回答。
+
+`AnswerClaim` 和 `GraphAnswerDraft` 是工作流内部契约，不进入 `GraphQAResponse` 或公开 API。
+
+### 4.13 回答校验
 
 图谱回答经过确定性证据审核后返回：
 
@@ -430,11 +449,12 @@ AnswerVerification
 
 - `checked_items` 是本轮可核对的关系、属性、统计和路径条目总数。
 - `matched_items` 是原回答逐项覆盖的条目数。
-- 只有 `matched_items == checked_items` 且存在待核对条目时，`status` 才为 `passed`。
+- 只有结构化 claim 全部通过编号核验，且 `matched_items == checked_items`、存在待核对条目时，`status` 才为 `passed`。
 - 覆盖不完整、空回答或缺少待核对条目时，系统使用证据化回答，`status=fallback`、`fallback_used=true`。
 - `missing_sources` 统计关系、属性和路径条目中 `source=null` 的数量；统计结果不单独计入来源缺失。
+- 存在缺失来源时，程序在最终回答中统一补充“当前图谱未提供出处”，不依赖模型自行生成来源声明。
 
-该审核只做确定性文本覆盖检查，不是模型自由评分，也不等价于完整医学事实审核。`GraphQAResponse.verification` 默认为空；只有进入图谱回答审核的工作流才设置。
+该审核只覆盖已定义的编号、结构、关键字段、数字/单位、否定词和来源披露检查，不是通用自然语言事实推理，也不等价于完整医学事实审核。`GraphQAResponse.verification` 默认为空；只有进入图谱回答审核的工作流才设置。
 
 ## 5. 大模型输出契约
 
@@ -492,9 +512,11 @@ AnswerVerification
 
 ### 5.4 回答
 
-回答节点输出纯文本。输入可以同时包含关系 `Evidence` 和属性 `AttributeFact`。引用内容由程序根据两类证据渲染，不由模型自行编造引用编号。涉及来源时使用图谱中的 `Source.name`。
+回答模型输出 `GraphAnswerDraft`。输入可以同时包含关系 `Evidence` 和属性 `AttributeFact`，模型只能通过 `support_ids` 引用已提供的事实。引用编号由程序分配和核对，不由模型自行创建。
 
-回答生成后必须执行逐项证据支持检查。回答需要覆盖全部本轮关系对象、属性事实、统计描述和路径节点；部分覆盖或空回答应替换为基于证据的简化回答并返回警告及结构化 `verification`。
+回答生成后必须执行逐项证据支持检查。结构化回答需要覆盖全部本轮关系证据和属性事实；统计描述和路径节点继续由确定性答案审核。部分覆盖、未知编号、事实不匹配或无效结构化输出应替换为基于证据的简化回答，并返回警告及结构化 `verification`。
+
+图谱回答只有在审核完成后才发送 `answer_delta`。直接回答等非图谱路径仍可流式输出。
 
 ## 6. Neo4j 仓储接口
 
@@ -578,7 +600,7 @@ HTTP 响应不得默认暴露原始提示词、模型隐藏推理和完整数据
 | `aggregates` | `items` 数组，受控计数结果 |
 | `paths` | `items` 数组，受控多跳路径 |
 | `audit` | 完整 `AnswerVerification` 对象 |
-| `answer_delta` | `delta` 文本 |
+| `answer_delta` | `delta` 文本；图谱回答仅在对应 `audit` 完成后发送 |
 | `warning` | `message` |
 | `error` | 稳定错误码与消息 |
 | `done` | 完整 `response` |
