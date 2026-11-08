@@ -321,6 +321,36 @@ class PathEvidence(StrictModel):
     target_label: EntityLabel
     source: Optional[str] = Field(default=None, max_length=1000)
 
+# 回答断言
+class AnswerClaim(StrictModel):
+    text: str = Field(min_length=1, max_length=1000)
+    support_ids: List[str] = Field(min_length=1)
+
+    @field_validator("text")
+    @classmethod
+    def strip_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("回答断言不能为空")
+        return value
+
+    @field_validator("support_ids")
+    @classmethod
+    def normalize_support_ids(cls, values: List[str]) -> List[str]:
+        normalized = []
+        for value in values:
+            value = value.strip()
+            if value and value not in normalized:
+                normalized.append(value)
+        if not normalized:
+            raise ValueError("回答断言至少需要一个证据编号")
+        return normalized
+
+
+# 结构化图谱回答
+class GraphAnswerDraft(StrictModel):
+    claims: List[AnswerClaim] = Field(min_length=1, max_length=50)
+
 # 答案验证
 class AnswerVerification(StrictModel):
     status: Literal["passed", "fallback"]

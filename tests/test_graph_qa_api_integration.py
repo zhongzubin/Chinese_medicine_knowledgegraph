@@ -75,4 +75,5 @@ def test_same_session_is_shared_across_api_instances():
     second_done = next(data for name, data in second_events if name == "done")
     second_payload = second_done["response"]
     assert second_payload["session_id"] == session_id
+    assert second_payload["error"] is None, second_payload
     assert "麻黄" in second_payload["rewritten_question"]

@@ -31,6 +31,7 @@ from graph_qa.models import (
     ConversationTurn,
     ErrorCode,
     Evidence,
+    GraphAnswerDraft,
     GraphQAStreamEvent,
     GraphQARequest,
     GraphQAResponse,
@@ -1418,7 +1419,6 @@ class GraphQAEngine:
             answer = append_disclaimer(
                 _multi_hop_answer(multi_hop_plan, paths)
             )
-            _emit_answer_delta(answer)
             return {
                 "answer": answer,
                 "grounded": True,
@@ -1433,7 +1433,6 @@ class GraphQAEngine:
                 *[f"- {name}" for name in result_names],
             ]
             answer = append_disclaimer("\n".join(lines))
-            _emit_answer_delta(answer)
             return {
                 "answer": answer,
                 "grounded": True,
@@ -1441,7 +1440,6 @@ class GraphQAEngine:
             }
         if aggregates and not evidence:
             answer = append_disclaimer(aggregate_answer(aggregates))
-            _emit_answer_delta(answer)
             return {
                 "answer": answer,
                 "grounded": True,
@@ -1451,68 +1449,30 @@ class GraphQAEngine:
             answer = append_disclaimer(
                 context_fallback_answer([], facts)
             )
-            _emit_answer_delta(answer)
             return {
                 "answer": answer,
                 "grounded": True,
                 "stage_events": ["answer_from_graph"],
             }
-        parts: List[str] = []
-
-        def on_token(token: str) -> None:
-            if token:
-                parts.append(token)
-                _emit_answer_delta(token)
-
         try:
-            streamed = self.agents.answer.stream_graph_answer(
+            answer_draft: GraphAnswerDraft = self.agents.answer.graph_answer(
                 _active_question(state),
                 state.get("linked_entities", []),
                 query_result.rows,
                 evidence,
                 facts,
-                on_token,
             )
-            if streamed is not None:
-                answer = "".join(parts) or streamed
-            else:
-                answer = self.agents.answer.graph_answer(
-                    _active_question(state),
-                    state.get("linked_entities", []),
-                    query_result.rows,
-                    evidence,
-                    facts,
-                )
-                _emit_answer_delta(answer)
-            final_answer = append_disclaimer(
-                _normalize_answer_formatting(answer, facts)
-            )
-            emitted = "".join(parts)
-            if final_answer.startswith(emitted):
-                _emit_answer_delta(final_answer[len(emitted) :])
             return {
-                "answer": final_answer,
+                "answer_draft": answer_draft,
                 "grounded": True,
                 "stage_events": ["answer_from_graph"],
             }
         except Exception:
-            if parts:
-                final_answer = append_disclaimer(
-                    _normalize_answer_formatting("".join(parts), facts)
-                )
-                _emit_answer_delta(final_answer[len("".join(parts)) :])
-                return {
-                    "answer": final_answer,
-                    "grounded": True,
-                    "warnings": ["回答流式生成中断，内容可能不完整。"],
-                    "stage_events": ["answer_from_graph"],
-                }
             fallback = append_disclaimer(evidence_fallback_answer(evidence))
             if facts:
                 fallback = append_disclaimer(
                     context_fallback_answer(evidence, facts)
                 )
-            _emit_answer_delta(fallback)
             return {
                 "answer": fallback,
                 "grounded": True,
@@ -1527,9 +1487,11 @@ class GraphQAEngine:
             state.get("facts", []),
             state.get("aggregates", []),
             state.get("paths", []),
+            answer_draft=state.get("answer_draft"),
         )
+        final_answer = append_disclaimer(decision.answer)
         update: Dict[str, Any] = {
-            "answer": decision.answer,
+            "answer": final_answer,
             "grounded": True,
             "verification": decision.verification,
             "stage_events": ["verify_answer"],
@@ -1705,6 +1667,7 @@ class GraphQAEngine:
             "facts": [],
             "aggregates": [],
             "paths": [],
+            "answer_draft": None,
             "verification": None,
             "error_code": None,
             "error_message": None,
@@ -1920,6 +1883,11 @@ class GraphQAEngine:
                             yield GraphQAStreamEvent(
                                 event="warning",
                                 data={"message": warning},
+                            )
+                        if node_name == "verify_answer" and update.get("answer"):
+                            yield GraphQAStreamEvent(
+                                event="answer_delta",
+                                data={"delta": update["answer"]},
                             )
                 elif mode == "custom":
                     if (

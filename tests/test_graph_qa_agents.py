@@ -16,11 +16,13 @@ from graph_qa.entity_linker import EntityIndex, EntityRecord
 from graph_qa.llm import ReasonerError
 from graph_qa.models import (
     AggregateQueryPlan,
+    AnswerClaim,
     AttributeFact,
     AttributeQueryPlan,
     CypherPlan,
     ErrorCode,
     Evidence,
+    GraphAnswerDraft,
     LinkedEntity,
     MultiConditionQueryPlan,
     MultiHopQueryPlan,
@@ -698,3 +700,132 @@ def test_evidence_audit_agent_rejects_partial_attribute_answer():
     assert decision.verification.checked_items == 2
     assert decision.verification.matched_items == 1
     assert "归经：肺经、膀胱经" in decision.answer
+
+
+def test_evidence_audit_agent_passes_structured_claims_and_discloses_source():
+    agent = EvidenceAuditAgent()
+    draft = GraphAnswerDraft(
+        claims=[
+            AnswerClaim(
+                text="麻黄具有发汗功效，性味为辛、微苦，温。",
+                support_ids=["E1", "F1"],
+            )
+        ]
+    )
+
+    decision = agent.audit(
+        "",
+        evidence=[
+            Evidence(
+                subject="麻黄",
+                subject_label="Herb",
+                relationship="HAS_EFFECT",
+                object="发汗",
+                object_label="Effect",
+            )
+        ],
+        facts=[
+            AttributeFact(
+                subject="麻黄",
+                subject_label="Herb",
+                attribute="property_flavor",
+                attribute_label="性味",
+                value="辛、微苦，温",
+            )
+        ],
+        answer_draft=draft,
+    )
+
+    assert decision.verification.status == "passed"
+    assert decision.verification.checked_items == 2
+    assert decision.verification.matched_items == 2
+    assert "来源说明：当前图谱未提供出处。" in decision.answer
+
+
+@pytest.mark.parametrize(
+    "claim_text, support_ids",
+    [
+        ("麻黄没有发汗功效。", ["E1"]),
+        ("桂枝具有发汗功效。", ["E1"]),
+        ("麻黄常用量为99克。", ["F1"]),
+        ("麻黄发汗，出自《来源未核对》。", ["F1"]),
+        ("麻黄具有发汗功效。", ["E9"]),
+    ],
+)
+def test_evidence_audit_agent_rejects_unsupported_structured_claims(
+    claim_text,
+    support_ids,
+):
+    agent = EvidenceAuditAgent()
+    draft = GraphAnswerDraft(
+        claims=[
+            AnswerClaim(
+                text=claim_text,
+                support_ids=support_ids,
+            )
+        ]
+    )
+
+    decision = agent.audit(
+        "",
+        evidence=[
+            Evidence(
+                subject="麻黄",
+                subject_label="Herb",
+                relationship="HAS_EFFECT",
+                object="发汗",
+                object_label="Effect",
+            )
+        ],
+        facts=[
+            AttributeFact(
+                subject="麻黄",
+                subject_label="Herb",
+                attribute="dosage",
+                attribute_label="用量",
+                value="9克",
+            )
+        ],
+        answer_draft=draft,
+    )
+
+    assert decision.verification.status == "fallback"
+    assert decision.verification.fallback_used is True
+    assert "未通过证据编号核验" in decision.verification.message
+
+
+def test_evidence_audit_agent_rejects_omitted_support_item():
+    agent = EvidenceAuditAgent()
+    draft = GraphAnswerDraft(
+        claims=[
+            AnswerClaim(
+                text="麻黄具有发汗功效。",
+                support_ids=["E1"],
+            )
+        ]
+    )
+
+    decision = agent.audit(
+        "",
+        evidence=[
+            Evidence(
+                subject="麻黄",
+                subject_label="Herb",
+                relationship="HAS_EFFECT",
+                object="发汗",
+                object_label="Effect",
+            ),
+            Evidence(
+                subject="麻黄",
+                subject_label="Herb",
+                relationship="TREATS_DISEASE",
+                object="风寒感冒",
+                object_label="Disease",
+            ),
+        ],
+        facts=[],
+        answer_draft=draft,
+    )
+
+    assert decision.verification.status == "fallback"
+    assert "未通过证据编号核验" in decision.verification.message

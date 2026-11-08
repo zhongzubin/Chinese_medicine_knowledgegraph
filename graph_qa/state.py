@@ -14,6 +14,7 @@ from graph_qa.models import (
     ConversationTurn,
     EntityCandidate,
     Evidence,
+    GraphAnswerDraft,
     IntentResult,
     LinkedEntity,
     MultiConditionQueryPlan,
@@ -60,6 +61,7 @@ class AgentState(TypedDict, total=False):
     evidence: List[Evidence]
     facts: List[AttributeFact]
     aggregates: List[AggregateFact]
+    answer_draft: Optional[GraphAnswerDraft]     # 结构化回答草稿
     paths: List[PathEvidence]
     verification: Optional[AnswerVerification]
     answer: str

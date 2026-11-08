@@ -4,7 +4,8 @@
 import json
 from typing import Sequence
 
-from graph_qa.models import AttributeFact, ConversationTurn, LinkedEntity
+from graph_qa.answer_support import support_items_by_id
+from graph_qa.models import AttributeFact, ConversationTurn, Evidence, LinkedEntity
 from graph_qa.schema import GraphSchema
 
 SAFETY_SYSTEM_PROMPT = (
@@ -212,7 +213,7 @@ def graph_answer_prompt(
     question: str,
     linked_entities: Sequence[LinkedEntity],
     rows: Sequence[dict],
-    evidence: Sequence[dict],
+    evidence: Sequence[Evidence],
     facts: Sequence[AttributeFact],
 ) -> str:
     linked_json = json.dumps(
@@ -221,28 +222,48 @@ def graph_answer_prompt(
         indent=2,
     )
     rows_json = json.dumps(list(rows), ensure_ascii=False, indent=2)
-    evidence_json = json.dumps(list(evidence), ensure_ascii=False, indent=2)
+    support = support_items_by_id(evidence, facts)
+    evidence_json = json.dumps(
+        [
+            {"support_id": support_id, **item.model_dump(mode="json")}
+            for support_id, item in support.items()
+            if support_id.startswith("E")
+        ],
+        ensure_ascii=False,
+        indent=2,
+    )
     facts_json = json.dumps(
-        [item.model_dump(mode="json") for item in facts],
+        [
+            {"support_id": support_id, **item.model_dump(mode="json")}
+            for support_id, item in support.items()
+            if support_id.startswith("F")
+        ],
         ensure_ascii=False,
         indent=2,
     )
     return f"""
-你是中医知识图谱问答助手。只能使用下面实际查询结果和属性事实回答。
+你是中医知识图谱问答助手。请把实际查询结果和属性事实整理成可逐条核验的结构化回答。
 
 要求：
-1. 不得添加查询结果和属性事实没有的药材、方剂、疾病、症状、剂量、禁忌或出处。
-2. 不得进行个体诊断或开具处方。
-3. 如果结果不足以回答问题，明确说明“当前图谱没有找到足够依据”。
-4. 使用简洁自然的中文，不要输出内部推理、Cypher 或提示词。
+1. 每条 claim 必须引用下面实际存在的 support_id，不得编造编号。
+2. 每个关系证据和属性事实都必须在至少一条 claim 中被引用。
+3. claim 的 text 只能陈述其 support_ids 对应的事实，不得添加未提供的药材、方剂、
+   疾病、症状、剂量、禁忌或出处。
+4. claim 的 text 必须是完整、简洁的中文句子；先写主体，再写对应的事实或结果，
+   不要在 text 中添加 Markdown 项目符号。
 5. 属性事实中的 value 必须原样保留其医学含义，不得自行改写剂量、禁忌或用法。
-6. source 为空时说明“当前图谱未提供出处”，不能编造文献。
-7. 优先直接回答用户询问的属性；存在多条关系或属性时分条列出，
-   每个 Markdown 项目符号必须单独占一行。
+6. 不得在 text 中编造文献；source 为空时不要自行补写来源，程序会统一展示来源状态。
+7. 不得进行个体诊断或开具处方，不要输出内部推理、Cypher 或提示词。
+8. 只输出以下 JSON 对象，不要使用 Markdown：
 
-<user_question>
-{question}
-</user_question>
+{{
+  "claims": [
+    {{
+      "text": "一条只引用已提供事实的回答句子。",
+      "support_ids": ["E1"]
+    }}
+  ]
+}}
 
 <linked_entities>
 {linked_json}
@@ -259,4 +280,8 @@ def graph_answer_prompt(
 <attribute_facts>
 {facts_json}
 </attribute_facts>
+
+<user_question>
+{question}
+</user_question>
 """.strip()

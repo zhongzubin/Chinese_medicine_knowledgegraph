@@ -9,12 +9,14 @@ from graph_qa.entity_linker import EntityIndex, EntityRecord
 from graph_qa.llm import ReasonerError
 from graph_qa.models import (
     AggregateFact,
+    AnswerClaim,
     AttributeFact,
     ConversationTurn,
     CypherPlan,
     EntityCandidate,
     ErrorCode,
     Evidence,
+    GraphAnswerDraft,
     IntentResult,
     LinkedEntity,
     QueryResult,
@@ -244,25 +246,20 @@ class FakeReasoner:
         rows: Sequence[dict],
         evidence: Sequence[Evidence],
         facts: Sequence[AttributeFact] = (),
-    ) -> str:
+    ) -> GraphAnswerDraft:
         self.answer_calls += 1
-        return self.grounded_answer
-
-    def stream_answer_from_graph(
-        self,
-        question,
-        linked_entities,
-        rows,
-        evidence,
-        facts,
-        on_token,
-    ):
-        self.answer_calls += 1
-        chunks = [self.grounded_answer[:4], self.grounded_answer[4:]]
-        for chunk in chunks:
-            if chunk:
-                on_token(chunk)
-        return "".join(chunks)
+        support_ids = [
+            *(f"E{index}" for index in range(1, len(evidence) + 1)),
+            *(f"F{index}" for index in range(1, len(facts) + 1)),
+        ]
+        return GraphAnswerDraft(
+            claims=[
+                AnswerClaim(
+                    text=self.grounded_answer,
+                    support_ids=support_ids,
+                )
+            ]
+        )
 
 
 class FakeRepository:
@@ -986,6 +983,17 @@ def test_stream_answer_emits_public_stages_progress_and_answer_deltas():
     )
     done = next(event for event in events if event.event == "done")
     audit = next(event for event in events if event.event == "audit")
+    verify_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.event == "stage" and event.data.get("stage") == "verify_answer"
+    )
+    audit_index = events.index(audit)
+    first_answer_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.event == "answer_delta"
+    )
     plan_stages = [
         event.data
         for event in events
@@ -1011,6 +1019,7 @@ def test_stream_answer_emits_public_stages_progress_and_answer_deltas():
         "answer_from_graph",
     }.issubset(stage_names)
     assert answer_text == done.data["response"]["answer"]
+    assert verify_index < audit_index < first_answer_index
     assert done.data["response"]["grounded"] is True
     assert done.data["response"]["verification"]["status"] == "passed"
     assert audit.data["agent"] == "evidence_audit"
@@ -1071,6 +1080,30 @@ def test_unsupported_answer_is_replaced_by_evidence_fallback():
     assert update["warnings"]
     assert update["verification"].status == "fallback"
     assert update["verification"].fallback_used is True
+
+
+def test_negated_structured_answer_is_not_streamed_to_user():
+    engine = GraphQAEngine(
+        reasoner=FakeReasoner(
+            intent=tcm_intent(),
+            grounded_answer="麻黄没有发汗功效。",
+        ),
+        repository=FakeRepository(),
+        schema=make_schema(),
+        entity_index=make_index(),
+    )
+
+    events = list(engine.stream_answer("麻黄有什么功效？"))
+    answer_text = "".join(
+        event.data["delta"]
+        for event in events
+        if event.event == "answer_delta"
+    )
+    done = next(event for event in events if event.event == "done")
+
+    assert "麻黄没有发汗功效" not in answer_text
+    assert "发汗" in answer_text
+    assert done.data["response"]["verification"]["status"] == "fallback"
 
 
 def test_answer_formatting_splits_inline_markdown_bullets():
@@ -1470,17 +1503,6 @@ def test_answer_model_failure_uses_evidence_fallback():
             rows,
             evidence,
             facts=(),
-        ):
-            raise RuntimeError("model down")
-
-        def stream_answer_from_graph(
-            self,
-            question,
-            linked_entities,
-            rows,
-            evidence,
-            facts,
-            on_token,
         ):
             raise RuntimeError("model down")
 

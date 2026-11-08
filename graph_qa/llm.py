@@ -16,6 +16,7 @@ from graph_qa.models import (
     EntityCandidate,
     ErrorCode,
     Evidence,
+    GraphAnswerDraft,
     IntentResult,
     LinkedEntity,
     RewriteResult,
@@ -81,18 +82,7 @@ class QAReasoner(Protocol):
         rows: Sequence[dict],
         evidence: Sequence[Evidence],
         facts: Sequence[AttributeFact] = (),
-    ) -> str:
-        ...
-
-    def stream_answer_from_graph(
-        self,
-        question: str,
-        linked_entities: Sequence[LinkedEntity],
-        rows: Sequence[dict],
-        evidence: Sequence[Evidence],
-        facts: Sequence[AttributeFact],
-        on_token: Callable[[str], None],
-    ) -> str:
+    ) -> GraphAnswerDraft:
         ...
 
 
@@ -266,39 +256,15 @@ class LangChainQAReasoner:
         rows: Sequence[dict],
         evidence: Sequence[Evidence],
         facts: Sequence[AttributeFact] = (),
-    ) -> str:
-        evidence_rows: List[dict] = [
-            item.model_dump(mode="json") for item in evidence
-        ]
-        return self._invoke_text(
+    ) -> GraphAnswerDraft:
+        result = self._invoke_json(
             graph_answer_prompt(
                 question,
                 linked_entities,
                 rows,
-                evidence_rows,
-                facts,
-            )
-        )
-
-    def stream_answer_from_graph(
-        self,
-        question: str,
-        linked_entities: Sequence[LinkedEntity],
-        rows: Sequence[dict],
-        evidence: Sequence[Evidence],
-        facts: Sequence[AttributeFact],
-        on_token: Callable[[str], None],
-    ) -> str:
-        evidence_rows: List[dict] = [
-            item.model_dump(mode="json") for item in evidence
-        ]
-        return self._stream_text(
-            graph_answer_prompt(
-                question,
-                linked_entities,
-                rows,
-                evidence_rows,
+                evidence,
                 facts,
             ),
-            on_token,
+            GraphAnswerDraft,
         )
+        return result  # type: ignore[return-value]

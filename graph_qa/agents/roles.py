@@ -12,6 +12,7 @@ from graph_qa.models import (
     ConversationTurn,
     EntityCandidate,
     Evidence,
+    GraphAnswerDraft,
     IntentResult,
     LinkedEntity,
     RewriteResult,
@@ -96,27 +97,6 @@ class AnswerAgent:
     def direct_answer(self, question: str) -> str:
         return self.reasoner.direct_answer(question)
 
-    def stream_graph_answer(
-        self,
-        question: str,
-        linked_entities: Sequence[LinkedEntity],
-        rows: Sequence[dict],
-        evidence: Sequence[Evidence],
-        facts: Sequence[AttributeFact],
-        on_token: Callable[[str], None],
-    ) -> Optional[str]:
-        method = getattr(self.reasoner, "stream_answer_from_graph", None)
-        if not callable(method):
-            return None
-        return method(
-            question,
-            linked_entities,
-            rows,
-            evidence,
-            facts,
-            on_token,
-        )
-
     def graph_answer(
         self,
         question: str,
@@ -124,7 +104,7 @@ class AnswerAgent:
         rows: Sequence[dict],
         evidence: Sequence[Evidence],
         facts: Sequence[AttributeFact],
-    ) -> str:
+    ) -> GraphAnswerDraft:
         return self.reasoner.answer_from_graph(
             question,
             linked_entities,
