@@ -103,6 +103,8 @@ def entity_extraction_prompt(question: str) -> str:
 3. 无法判断标签时使用 null。
 4. 同一个词可能同时属于不同标签，不要把标签建议当作已确认的最终类型。
 5. 不要输出解释。
+6. “能清除、改善、补益、化解……”等功效描述优先建议 Effect；
+   明确使用“治疗、病证”时建议 Disease，明确使用“缓解、症状”时建议 Symptom。
 
 只输出以下 JSON：
 {{

@@ -53,6 +53,26 @@ class FailOnBuildEncoder:
         raise AssertionError("cached index should not rebuild")
 
 
+class LabelFilterEncoder:
+    def encode(self, texts, **kwargs):
+        del kwargs
+        vectors = []
+        for text in texts:
+            if "清除体内热毒" in text:
+                vectors.append([1.0, 0.0, 0.0, 0.0])
+            elif "热毒内盛" in text:
+                vectors.append([1.0, 0.0, 0.0, 0.0])
+            elif "热毒肿痛" in text:
+                vectors.append([0.99, 0.1, 0.0, 0.0])
+            elif "热毒疮肿" in text:
+                vectors.append([0.98, 0.15, 0.0, 0.0])
+            elif "清热解毒" in text:
+                vectors.append([0.6, 0.8, 0.0, 0.0])
+            else:
+                vectors.append([0.0, 0.0, 0.0, 1.0])
+        return np.asarray(vectors, dtype=np.float32)
+
+
 def make_semantic_index(threshold=0.65):
     entries = [
         EntityIndexEntry("Herb", "麻黄", ("龙沙",)),
@@ -130,6 +150,32 @@ def test_entity_index_prefers_high_confidence_fuzzy_over_noisy_semantic():
     assert results[0].name == "麻黄"
     assert results[0].match_type == "fuzzy"
     assert all(item.match_type != "semantic" for item in results)
+
+
+def test_semantic_index_label_filter_finds_lower_ranked_target_label():
+    index = SemanticEntityIndex(
+        [
+            EntityIndexEntry("Disease", "热毒内盛", ()),
+            EntityIndexEntry("Disease", "热毒肿痛", ()),
+            EntityIndexEntry("Disease", "热毒疮肿", ()),
+            EntityIndexEntry("Effect", "清热解毒", ()),
+        ],
+        LabelFilterEncoder(),
+        top_k=3,
+        threshold=0.5,
+    )
+
+    default_results = index.match("清除体内热毒")
+    filtered_results = index.match(
+        "清除体内热毒",
+        labels=("Effect",),
+        candidate_limit=20,
+    )
+
+    assert {item.label for item in default_results} == {"Disease"}
+    assert [(item.label, item.name) for item in filtered_results] == [
+        ("Effect", "清热解毒")
+    ]
 
 
 def test_semantic_faiss_index_is_reused_from_disk_cache(tmp_path):

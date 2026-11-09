@@ -187,9 +187,17 @@ class SemanticEntityIndex:
         aliases = "，".join(entry.aliases)
         return f"实体类型：{entry.label}；名称：{entry.name}；别名：{aliases}"
 
-    def match(self, text: str) -> list[LinkedEntity]:
+    def match(
+        self,
+        text: str,
+        *,
+        labels: Optional[Sequence[str]] = None,
+        candidate_limit: Optional[int] = None,
+    ) -> list[LinkedEntity]:
         if not text.strip() or not len(self.entries):
             return []
+        if candidate_limit is not None and candidate_limit < 1:
+            raise ValueError("candidate_limit 必须大于等于 1")
         vector = np.asarray(
             self.encoder.encode(
                 [text],
@@ -203,15 +211,19 @@ class SemanticEntityIndex:
         if vector.ndim != 2 or vector.shape[0] != 1:
             raise SemanticIndexError("查询向量输出维度不正确")
         faiss.normalize_L2(vector)
+        search_limit = candidate_limit or self.top_k
         scores, indices = self._index.search(
             vector,
-            min(self.top_k, len(self.entries)),
+            min(search_limit, len(self.entries)),
         )
+        allowed_labels = set(labels) if labels is not None else None
         results = []
         for score, index in zip(scores[0], indices[0]):
             if index < 0 or float(score) < self.threshold:
                 continue
             entry = self.entries[int(index)]
+            if allowed_labels is not None and entry.label not in allowed_labels:
+                continue
             results.append(
                 LinkedEntity(
                     label=entry.label,
@@ -221,4 +233,6 @@ class SemanticEntityIndex:
                     score=round(float(score), 4),
                 )
             )
+            if len(results) >= self.top_k:
+                break
         return results
