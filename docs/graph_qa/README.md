@@ -126,17 +126,15 @@ M1 实现中遇到的问题、修复过程和遗留限制记录在 [implementati
 
 ## 当前验证状态
 
-- 全量 pytest：251 passed、5 skipped。
-- 黄金集：120 条；完整工作流 outcome 通过 119/120。
-- 纯召回 Recall@3：100%；完整工作流实体 Recall@3：96.67%。
-- 产品固定集：198/200 outcome 通过，接受门禁通过；2 条 semantic
-  “清除体内热毒”用例诚实返回无依据。
+- 全量 pytest：255 passed、5 skipped。
+- 黄金集：120 条；完整工作流 outcome 通过 120/120。
+- 纯召回 Recall@3：100%；完整工作流实体 Recall@3：98.89%。
+- 产品固定集：200/200 outcome 通过，接受门禁通过。
 - 未知实体误召回率：0%，20 条。
 - 无依据诚实率：100%，15 条。
 - 无来源披露率：100%，10 条指定用例。
 - 回答审核和 grounded 证据覆盖率：100%。
-- 多轮固定集：20 组、62 轮，outcome 为 90.32%、实体匹配率为 94.74%；
-  5 个波动用例单独重跑后 15/15 轮全部通过。
+- 多轮固定集：20 组、62 轮，outcome 和实体匹配均为 100%。
 - 初始口径见 [实体召回路径评测报告](retrieval-evaluation-2026-10-28.md)。
 - 最新修复结果见 [实体边界与 grounded 修复记录](retrieval-boundary-fix-2026-10-28.md)。
 - 验收门槛与退出码见 [黄金集验收门槛说明](evaluation-acceptance-2026-10-28.md)。
@@ -170,6 +168,8 @@ M1 实现中遇到的问题、修复过程和遗留限制记录在 [implementati
 [quality-boundary-validation-2026-11-01.md](quality-boundary-validation-2026-11-01.md)。
 结构化回答审核、真实依赖和浏览器验证见
 [trustworthy-answer-v1.1-validation-2026-11-09.md](trustworthy-answer-v1.1-validation-2026-11-09.md)。
+语义标签约束、候选去噪和固定集改善见
+[语义召回边界验证记录](语义召回边界验证记录-2026-11-09.md)。
 
 ## M1 回归 DoD
 
