@@ -204,6 +204,8 @@ LinkedEntity
 
 具体名称形态的 Herb、Formula、Source 不得仅凭 semantic 候选通过链接。未解析代词不得进入 semantic 实体链接。Effect、Disease、Symptom 的描述性同义召回不受该限制。
 
+描述性 semantic 候选优先使用 `suggested_label` 在更大的 FAISS 候选集合中筛选；同标签没有结果时，允许回退全局 semantic Top-3，兼容模型标签提示错误。较长描述候选已经得到 semantic 结果时，其包含的较短子串候选不再追加不同标签结果。精确名称和别名匹配不受建议标签硬过滤。
+
 未成功链接实体时返回澄清并包含“补充或确认具体名称”要求。已链接实体但无对应属性、关系或路径时返回固定无依据说明，`grounded=false`、`verification=null`，不得由模型补写医疗事实。查询返回记录但无法构造合法证据时仍返回 `NO_GRAPH_EVIDENCE`。
 
 ### 4.4 检索规划

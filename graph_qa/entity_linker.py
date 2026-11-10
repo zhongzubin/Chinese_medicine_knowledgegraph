@@ -187,6 +187,7 @@ NAMED_ENTITY_SUFFIXES = frozenset(
     | {"病", "症", "证", "芝", "藻", "菌"}
 )
 SEMANTIC_NAMED_LABELS = frozenset({"Herb", "Formula", "Source"})
+SEMANTIC_LABEL_CANDIDATE_LIMIT = 20
 
 
 def normalize_entity_text(value: str) -> str:
@@ -293,7 +294,13 @@ class EntityIndexEntry:
 
 
 class SemanticMatcher(Protocol):
-    def match(self, text: str) -> List[LinkedEntity]:
+    def match(
+        self,
+        text: str,
+        *,
+        labels: Optional[Sequence[str]] = None,
+        candidate_limit: Optional[int] = None,
+    ) -> List[LinkedEntity]:
         ...
 
 
@@ -467,8 +474,20 @@ class EntityIndex:
         ]
         if candidates and not linkable_candidates:
             return []
+        linkable_candidates.sort(
+            key=lambda candidate: len(normalize_entity_text(candidate.text)),
+            reverse=True,
+        )
 
+        semantic_parent_texts: List[str] = []
         for candidate in linkable_candidates:
+            normalized_candidate = normalize_entity_text(candidate.text)
+            if any(
+                normalized_candidate != parent
+                and normalized_candidate in parent
+                for parent in semantic_parent_texts
+            ):
+                continue
             result_count_before_candidate = len(results)
             exact_matches = self._exact_matches(candidate.text)
             if candidate.suggested_label:
@@ -484,12 +503,12 @@ class EntityIndex:
                 if fuzzy_matches:
                     results.extend(fuzzy_matches)
                 elif self.semantic_index is not None:
-                    results.extend(
-                        self._semantic_matches_for_candidate(
-                            candidate.text,
-                            self.semantic_index.match(candidate.text),
-                        )
+                    semantic_matches = self._semantic_matches_for_candidate(
+                        candidate
                     )
+                    if semantic_matches:
+                        semantic_parent_texts.append(normalized_candidate)
+                        results.extend(semantic_matches)
 
         if not results:
             results.extend(self._direct_question_matches(normalized_question, None))
@@ -509,13 +528,32 @@ class EntityIndex:
 
         return self._finalize(results, limit_per_label)
 
-    @staticmethod
     def _semantic_matches_for_candidate(
-        text: str,
-        matches: Sequence[LinkedEntity],
+        self,
+        candidate: EntityCandidate,
     ) -> List[LinkedEntity]:
-        if not looks_like_named_entity(text):
-            return list(matches)
+        labels = (
+            (candidate.suggested_label,)
+            if candidate.suggested_label
+            else None
+        )
+        if labels is None:
+            matches = self.semantic_index.match(candidate.text)
+        else:
+            labeled_matches = self.semantic_index.match(
+                candidate.text,
+                labels=labels,
+                candidate_limit=SEMANTIC_LABEL_CANDIDATE_LIMIT,
+            )
+            matches = [
+                item
+                for item in labeled_matches
+                if item.label == candidate.suggested_label
+            ]
+            if not matches:
+                matches = self.semantic_index.match(candidate.text)
+        if not looks_like_named_entity(candidate.text):
+            return matches
         return [
             item
             for item in matches

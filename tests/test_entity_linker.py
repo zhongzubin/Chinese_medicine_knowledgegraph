@@ -118,7 +118,8 @@ def test_generic_entity_candidate_does_not_trigger_semantic_match():
         def __init__(self):
             self.calls = []
 
-        def match(self, text):
+        def match(self, text, *, labels=None, candidate_limit=None):
+            del labels, candidate_limit
             self.calls.append(text)
             return [
                 LinkedEntity(
@@ -147,7 +148,8 @@ def test_generic_entity_candidate_does_not_trigger_semantic_match():
 
 def test_unknown_named_herb_is_not_accepted_from_semantic_only_match():
     class NamedHerbSemanticMatcher:
-        def match(self, text):
+        def match(self, text, *, labels=None, candidate_limit=None):
+            del labels, candidate_limit
             return [
                 LinkedEntity(
                     label="Herb",
@@ -173,7 +175,8 @@ def test_unknown_named_herb_is_not_accepted_from_semantic_only_match():
 
 def test_named_question_does_not_fall_back_to_semantic_herb_match():
     class NamedHerbSemanticMatcher:
-        def match(self, text):
+        def match(self, text, *, labels=None, candidate_limit=None):
+            del labels, candidate_limit
             return [
                 LinkedEntity(
                     label="Herb",
@@ -196,7 +199,9 @@ def test_named_question_does_not_fall_back_to_semantic_herb_match():
 
 def test_descriptive_phrase_still_uses_semantic_effect_match():
     class EffectSemanticMatcher:
-        def match(self, text):
+        def match(self, text, *, labels=None, candidate_limit=None):
+            assert labels == ("Effect",)
+            assert candidate_limit == 20
             return [
                 LinkedEntity(
                     label="Effect",
@@ -214,6 +219,127 @@ def test_descriptive_phrase_still_uses_semantic_effect_match():
 
     linked = index.match(
         [EntityCandidate(text="清除体内热毒", suggested_label="Effect")],
+        "哪些方剂能清除体内热毒？",
+    )
+
+    assert [(item.label, item.name) for item in linked] == [
+        ("Effect", "清热解毒")
+    ]
+
+
+def test_semantic_match_filters_by_candidate_label_hint():
+    class LabelAwareSemanticMatcher:
+        def match(self, text, *, labels=None, candidate_limit=None):
+            assert text == "清除体内热毒"
+            assert labels == ("Effect",)
+            assert candidate_limit == 20
+            return [
+                LinkedEntity(
+                    label="Disease",
+                    name="热毒内盛",
+                    matched_text=text,
+                    match_type="semantic",
+                    score=0.7,
+                ),
+                LinkedEntity(
+                    label="Effect",
+                    name="清热解毒",
+                    matched_text=text,
+                    match_type="semantic",
+                    score=0.62,
+                ),
+            ]
+
+    index = EntityIndex.from_records(
+        [
+            EntityRecord("Disease", "热毒内盛"),
+            EntityRecord("Effect", "清热解毒"),
+        ],
+        semantic_index=LabelAwareSemanticMatcher(),
+    )
+
+    linked = index.match(
+        [EntityCandidate(text="清除体内热毒", suggested_label="Effect")],
+        "哪些方剂能清除体内热毒？",
+    )
+
+    assert [(item.label, item.name) for item in linked] == [
+        ("Effect", "清热解毒")
+    ]
+
+
+def test_semantic_match_falls_back_when_label_hint_has_no_match():
+    class WrongLabelSemanticMatcher:
+        def match(self, text, *, labels=None, candidate_limit=None):
+            if labels is not None:
+                assert labels == ("Symptom",)
+                assert candidate_limit == 20
+                return []
+            return [
+                LinkedEntity(
+                    label="Disease",
+                    name="肠燥便难",
+                    matched_text=text,
+                    match_type="semantic",
+                    score=0.62,
+                )
+            ]
+
+    index = EntityIndex.from_records(
+        [EntityRecord("Disease", "肠燥便难")],
+        semantic_index=WrongLabelSemanticMatcher(),
+    )
+
+    linked = index.match(
+        [EntityCandidate(text="大便干硬难排", suggested_label="Symptom")],
+        "大便干硬难排可以用哪些药材治疗？",
+    )
+
+    assert [(item.label, item.name) for item in linked] == [
+        ("Disease", "肠燥便难")
+    ]
+
+
+def test_longer_semantic_candidate_suppresses_contained_label_noise():
+    class NestedCandidateSemanticMatcher:
+        def match(self, text, *, labels=None, candidate_limit=None):
+            del candidate_limit
+            if text == "清除体内热毒":
+                assert labels == ("Effect",)
+                return [
+                    LinkedEntity(
+                        label="Effect",
+                        name="清热解毒",
+                        matched_text=text,
+                        match_type="semantic",
+                        score=0.62,
+                    )
+                ]
+            assert text == "热毒"
+            assert labels == ("Disease",)
+            return [
+                LinkedEntity(
+                    label="Disease",
+                    name="热毒内盛",
+                    matched_text=text,
+                    match_type="semantic",
+                    score=0.7,
+                )
+            ]
+
+    index = EntityIndex.from_records(
+        [
+            EntityRecord("Disease", "热毒内盛"),
+            EntityRecord("Effect", "清热解毒"),
+        ],
+        semantic_index=NestedCandidateSemanticMatcher(),
+    )
+
+    linked = index.match(
+        [
+            EntityCandidate(text="热毒", suggested_label="Disease"),
+            EntityCandidate(text="清除体内热毒", suggested_label="Effect"),
+        ],
         "哪些方剂能清除体内热毒？",
     )
 
