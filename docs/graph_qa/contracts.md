@@ -458,6 +458,18 @@ AnswerVerification
 
 该审核只覆盖已定义的编号、结构、关键字段、数字/单位、否定词和来源披露检查，不是通用自然语言事实推理，也不等价于完整医学事实审核。`GraphQAResponse.verification` 默认为空；只有进入图谱回答审核的工作流才设置。
 
+### 4.14 内部阶段耗时
+
+LangGraph 每个节点记录内部 `StageTiming`：
+
+```text
+StageTiming
+- stage: str
+- elapsed_ms: float
+```
+
+`GraphQAEngine.answer_with_timings()` 返回原有 `GraphQAResponse` 和阶段耗时列表，供 `graph_qa.latency_evaluate` 汇总；`answer()` 行为不变。阶段耗时属于内部观测数据，不进入公开响应或 SSE 事件，不包含提示词、Cypher、模型隐藏推理或用户健康数据。
+
 ## 5. 大模型输出契约
 
 ### 5.1 意图分类

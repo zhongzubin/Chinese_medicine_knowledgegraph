@@ -22,6 +22,7 @@ from graph_qa.models import (
     PathEvidence,
     QueryResult,
     RetrievalPlanKind,
+    StageTiming,
 )
 
 
@@ -67,5 +68,6 @@ class AgentState(TypedDict, total=False):
     answer: str
     grounded: bool
     warnings: Annotated[List[str], operator.add]
+    stage_timings: Annotated[List[StageTiming], operator.add]     # 阶段耗时
 
     stage_events: Annotated[List[str], operator.add]

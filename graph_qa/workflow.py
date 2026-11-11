@@ -4,6 +4,7 @@
 import re
 import unicodedata
 import uuid
+from time import perf_counter
 from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 from langgraph.config import get_stream_writer
@@ -15,6 +16,7 @@ from graph_qa.agents.evidence_audit import (
     aggregate_answer,
     context_fallback_answer,
     evidence_fallback_answer,
+    supports_controlled_evidence_answer,
 )
 from graph_qa.agents.retrieval import (
     RETRIEVAL_PLAN_LABELS,
@@ -40,6 +42,7 @@ from graph_qa.models import (
     PathEvidence,
     QueryInfo,
     RetrievalPlanningInput,
+    StageTiming,
     append_disclaimer,
 )
 from graph_qa.neo4j_repository import RepositoryError
@@ -451,25 +454,50 @@ class GraphQAEngine:
         )
         self.graph = self._build_graph()
 
+    @staticmethod
+    def _timed_node(
+        stage: str,
+        handler: Callable[[AgentState], Dict[str, Any]],
+    ) -> Callable[[AgentState], Dict[str, Any]]:
+        def wrapped(state: AgentState) -> Dict[str, Any]:
+            started = perf_counter()
+            update = handler(state)
+            elapsed_ms = (perf_counter() - started) * 1000
+            return {
+                **update,
+                "stage_timings": [
+                    StageTiming(
+                        stage=stage,
+                        elapsed_ms=round(elapsed_ms, 3),
+                    )
+                ],
+            }
+
+        return wrapped
+
     def _build_graph(self):
         builder = StateGraph(AgentState)
-        builder.add_node("normalize", self._normalize)
-        builder.add_node("rewrite_question", self._rewrite_question)
-        builder.add_node("prelink_entities", self._prelink_entities)
-        builder.add_node("classify_intent", self._classify_intent)
-        builder.add_node("extract_entities", self._extract_entities)
-        builder.add_node("link_entities", self._link_entities)
-        builder.add_node("plan_cypher", self._plan_cypher)
-        builder.add_node("validate_cypher", self._validate_cypher)
-        builder.add_node("execute_cypher", self._execute_cypher)
-        builder.add_node("retrieve_observe", self._retrieve_observe)
-        builder.add_node("answer_from_graph", self._answer_from_graph)
-        builder.add_node("verify_answer", self._verify_answer)
-        builder.add_node("direct_answer", self._direct_answer)
-        builder.add_node("clarify", self._clarify)
-        builder.add_node("no_evidence", self._no_evidence)
-        builder.add_node("safe_fail", self._safe_fail)
-        builder.add_node("finish", lambda state: {})
+        nodes = {
+            "normalize": self._normalize,
+            "rewrite_question": self._rewrite_question,
+            "prelink_entities": self._prelink_entities,
+            "classify_intent": self._classify_intent,
+            "extract_entities": self._extract_entities,
+            "link_entities": self._link_entities,
+            "plan_cypher": self._plan_cypher,
+            "validate_cypher": self._validate_cypher,
+            "execute_cypher": self._execute_cypher,
+            "retrieve_observe": self._retrieve_observe,
+            "answer_from_graph": self._answer_from_graph,
+            "verify_answer": self._verify_answer,
+            "direct_answer": self._direct_answer,
+            "clarify": self._clarify,
+            "no_evidence": self._no_evidence,
+            "safe_fail": self._safe_fail,
+            "finish": lambda state: {},
+        }
+        for stage, handler in nodes.items():
+            builder.add_node(stage, self._timed_node(stage, handler))
 
         builder.add_edge(START, "normalize")
         builder.add_conditional_edges(
@@ -1454,6 +1482,13 @@ class GraphQAEngine:
                 "grounded": True,
                 "stage_events": ["answer_from_graph"],
             }
+        if not facts and supports_controlled_evidence_answer(evidence):
+            answer = append_disclaimer(evidence_fallback_answer(evidence))
+            return {
+                "answer": answer,
+                "grounded": True,
+                "stage_events": ["answer_from_graph"],
+            }
         try:
             answer_draft: GraphAnswerDraft = self.agents.answer.graph_answer(
                 _active_question(state),
@@ -1669,6 +1704,7 @@ class GraphQAEngine:
             "paths": [],
             "answer_draft": None,
             "verification": None,
+            "stage_timings": [],
             "error_code": None,
             "error_message": None,
             "last_error_code": None,
@@ -1743,13 +1779,13 @@ class GraphQAEngine:
             ),
         )
 
-    def answer(
+    def answer_with_timings(
         self,
         question: str,
         request_id: Optional[str] = None,
         conversation_history: Optional[Sequence[ConversationTurn]] = None,
         session_id: Optional[str] = None,
-    ) -> GraphQAResponse:
+    ) -> Tuple[GraphQAResponse, List[StageTiming]]:
         request_id = request_id or str(uuid.uuid4())
         initial_state = self._initial_state(
             question,
@@ -1760,17 +1796,36 @@ class GraphQAEngine:
         try:
             final_state = self.graph.invoke(initial_state)
         except Exception:
-            return self._internal_error_response(
-                request_id,
-                question,
-                session_id,
+            return (
+                self._internal_error_response(
+                    request_id,
+                    question,
+                    session_id,
+                ),
+                [],
             )
-        return self._response_from_state(
+        response = self._response_from_state(
             request_id,
             question,
             session_id,
             final_state,
         )
+        return response, list(final_state.get("stage_timings", []))
+
+    def answer(
+        self,
+        question: str,
+        request_id: Optional[str] = None,
+        conversation_history: Optional[Sequence[ConversationTurn]] = None,
+        session_id: Optional[str] = None,
+    ) -> GraphQAResponse:
+        response, _timings = self.answer_with_timings(
+            question,
+            request_id=request_id,
+            conversation_history=conversation_history,
+            session_id=session_id,
+        )
+        return response
 
     def stream_answer(
         self,

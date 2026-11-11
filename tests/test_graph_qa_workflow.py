@@ -427,6 +427,42 @@ def test_workflow_returns_grounded_answer_query_and_evidence():
     assert "不能替代专业医疗诊断和治疗" in response.answer
     assert repository.explain_calls == 1
     assert repository.execute_calls == 1
+    assert reasoner.answer_calls == 0
+
+
+def test_workflow_returns_internal_stage_timings():
+    reasoner = FakeReasoner(
+        intent=tcm_intent(),
+        candidates=[EntityCandidate(text="麻黄", suggested_label="Herb")],
+        plans=[make_plan()],
+    )
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=FakeRepository(),
+        schema=make_schema(),
+        entity_index=make_index(),
+    )
+
+    response, timings = engine.answer_with_timings(
+        "麻黄有什么功效？",
+        request_id="timed-request",
+    )
+
+    assert response.error is None
+    assert response.request_id == "timed-request"
+    assert {
+        "normalize",
+        "rewrite_question",
+        "prelink_entities",
+        "link_entities",
+        "plan_cypher",
+        "validate_cypher",
+        "execute_cypher",
+        "retrieve_observe",
+        "answer_from_graph",
+        "verify_answer",
+    }.issubset({item.stage for item in timings})
+    assert all(item.elapsed_ms >= 0 for item in timings)
 
 
 def test_attribute_question_uses_controlled_template_and_facts():
@@ -1082,7 +1118,7 @@ def test_unsupported_answer_is_replaced_by_evidence_fallback():
     assert update["verification"].fallback_used is True
 
 
-def test_negated_structured_answer_is_not_streamed_to_user():
+def test_controlled_relation_answer_skips_negated_model_draft():
     engine = GraphQAEngine(
         reasoner=FakeReasoner(
             intent=tcm_intent(),
@@ -1103,7 +1139,7 @@ def test_negated_structured_answer_is_not_streamed_to_user():
 
     assert "麻黄没有发汗功效" not in answer_text
     assert "发汗" in answer_text
-    assert done.data["response"]["verification"]["status"] == "fallback"
+    assert done.data["response"]["verification"]["status"] == "passed"
 
 
 def test_answer_formatting_splits_inline_markdown_bullets():
@@ -1518,8 +1554,48 @@ def test_answer_model_failure_uses_evidence_fallback():
         entity_index=make_index(),
     )
 
-    response = engine.answer("麻黄能做什么？")
+    update = engine._answer_from_graph(
+        {
+            "normalized_question": "麻黄能做什么？",
+            "linked_entities": [
+                LinkedEntity(
+                    label="Herb",
+                    name="麻黄",
+                    matched_text="麻黄",
+                    match_type="name",
+                    score=1.0,
+                )
+            ],
+            "query_result": QueryResult(
+                cypher=VALID_QUERY,
+                parameters={"entity_names": ["麻黄"]},
+                rows=ROWS,
+                row_count=1,
+                elapsed_ms=1,
+                limit_applied=20,
+            ),
+            "cypher_plan": make_plan(),
+            "evidence": [
+                Evidence(
+                    subject="麻黄",
+                    subject_label="Herb",
+                    relationship="HAS_EFFECT",
+                    object="发汗",
+                    object_label="Effect",
+                )
+            ],
+            "facts": [
+                AttributeFact(
+                    subject="麻黄",
+                    subject_label="Herb",
+                    attribute="property_flavor",
+                    attribute_label="性味",
+                    value="辛、微苦，温",
+                )
+            ],
+        }
+    )
 
-    assert response.grounded is True
-    assert "麻黄" in response.answer
-    assert response.warnings
+    assert update["grounded"] is True
+    assert "麻黄" in update["answer"]
+    assert update["warnings"]

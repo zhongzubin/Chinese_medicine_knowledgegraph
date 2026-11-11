@@ -77,6 +77,7 @@ flowchart TB
 | `streamlit_app.py` | 进度和回答分栏展示 | 业务校验和数据库访问 |
 | `cli.py` | 参数解析、结果序列化和退出码 | 前端交互 |
 | `evaluate.py` | 加载问题集、运行工作流、统计指标 | 修改图数据 |
+| `latency_evaluate.py` | 汇总工作流阶段耗时、P50/P95 和占比 | 修改公开响应契约 |
 
 模块应通过清晰的数据模型通信，不共享可变的全局字典。
 
@@ -131,7 +132,7 @@ flowchart TB
 | `intent` | `prelink_entities`、`classify_intent` | 已知实体预匹配由确定性代码完成，未命中时通过角色对象分类 |
 | `entity` | `extract_entities`、`link_entities` | 模型候选抽取通过角色对象完成，最终链接由确定性链接器确认 |
 | `retrieval` | `plan_cypher`、`validate_cypher`、`execute_cypher`、`retrieve_observe` | 真实受控闭环 Agent；选择计划、观察校验/执行结果并决定重规划、回答、无依据或安全终止 |
-| `answer` | `answer_from_graph`、`direct_answer` | 图谱回答和直接回答通过角色对象调用模型，失败时使用证据化降级 |
+| `answer` | `answer_from_graph`、`direct_answer` | 受控关系使用确定性中文回答；复杂图谱回答和直接回答调用模型，失败时使用证据化降级 |
 | `evidence_audit` | `verify_answer`、`clarify`、`no_evidence`、`safe_fail`、`finish` | 真实确定性 Agent；核对全部本轮证据并使用证据化回退，其余阶段仍由工作流收口 |
 
 该注册表提供重复 Agent、重复阶段和未知阶段的明确错误。`RetrievalAgent` 接收问题、已链接实体、Schema、计划尝试状态和受限模型回退生成器，并通过 `retrieve_observe` 消费工具结果；它不持有 Cypher Guard 或仓储，不能自行执行查询。SSE `stage` 事件携带阶段对应的 `agent`，`plan_cypher` 阶段另外携带稳定的 `plan_kind` 和中文 `plan_label`，`retrieve_observe` 公开当前步数、下一步决策和稳定原因码；审核完成后另有 `audit` 事件。当前 LangGraph 是 17 个固定节点，已经具备主图内的受控 Agent 循环，但不是独立 Agent 子图或动态调度系统。
@@ -300,7 +301,11 @@ M1 使用 Python 标准库实现字符串相似度。当前 M3 扩展增加本�
 
 图谱回答模型返回 `GraphAnswerDraft`，每条 claim 必须通过 `support_ids` 引用本轮关系证据或属性事实。`EvidenceAuditAgent` 检查编号是否存在、每项证据是否被覆盖、claim 主体和事实值是否匹配，以及数字、单位、否定词和文献标题是否能在引用事实中找到；聚合描述和路径节点继续使用确定性审核。未通过核验时替换为基于证据的简化回答，前端只接收审核后的图谱答案。
 
+简单受控关系证据使用中文确定性模板，不调用回答模型；混合事实、未知关系和复杂组合继续使用 `GraphAnswerDraft`。两类答案都必须经过同一证据审核和来源披露。
+
 审核结果同时记录已核对/已匹配数量、缺失来源数和是否使用回退，并通过 API、SSE、CLI 和 Streamlit 展示。来源缺失由程序统一补充。该检查不等价于完整语义等价或医学事实审核；独立人工事实审核通过 `graph_qa.human_fact_audit` 生成 50 条待审核样本并汇总人工结论。关系多来源会合并到同一条证据中展示。
+
+LangGraph 节点统一记录内部 `StageTiming`。`answer_with_timings()` 和 `graph_qa.latency_evaluate` 可生成阶段均值、P50、P95、最大值和累计占比；该轨迹不进入公开 API、SSE 或会话存储。
 
 ## 10. 关键设计决策
 
