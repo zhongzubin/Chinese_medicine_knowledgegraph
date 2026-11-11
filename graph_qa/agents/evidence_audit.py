@@ -4,7 +4,7 @@
 import re
 import unicodedata
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Dict, Optional, Sequence
 
 from graph_qa.agents.base import AgentDescriptor
 from graph_qa.answer_support import support_items_by_id
@@ -30,6 +30,14 @@ FALLBACK_WARNING = (
     "已改为证据化回答。"
 )
 SOURCE_NOTICE = "来源说明：当前图谱未提供出处。"
+RELATION_ANSWER_TEMPLATES = {
+    "HAS_EFFECT": "{subject}具有以下功效：{objects}",
+    "HAS_INGREDIENT": "{subject}含有以下成分：{objects}",
+    "TREATS_DISEASE": "{subject}可用于治疗：{objects}",
+    "ALLEVIATES_SYMPTOM": "{subject}可缓解：{objects}",
+    "HAS_SYMPTOM": "{subject}可能涉及以下症状：{objects}",
+    "FROM_SOURCE": "{subject}的相关出处：{objects}",
+}
 
 
 @dataclass(frozen=True)
@@ -200,14 +208,37 @@ def ensure_source_disclosure(
     return answer
 
 
+def supports_controlled_evidence_answer(evidence: Sequence[Evidence]) -> bool:
+    return bool(evidence) and all(
+        item.relationship in RELATION_ANSWER_TEMPLATES
+        for item in evidence
+    )
+
+
 def evidence_fallback_answer(evidence: Sequence[Evidence]) -> str:
-    lines = ["根据当前图谱中可验证的关系："]
-    for item in evidence[:5]:
-        source = f"（来源：{item.source}）" if item.source else ""
-        lines.append(
-            f"- {item.subject} 通过 {item.relationship} "
-            f"关联到 {item.object}{source}"
+    grouped: Dict[tuple[str, str, str], list[Evidence]] = {}
+    for item in evidence:
+        key = (item.subject, item.subject_label, item.relationship)
+        grouped.setdefault(key, []).append(item)
+
+    lines = ["根据当前图谱中可验证的信息："]
+    for (subject, _label, relationship), items in grouped.items():
+        objects = list(dict.fromkeys(item.object for item in items))
+        template = RELATION_ANSWER_TEMPLATES.get(
+            relationship,
+            "{subject}通过 " + relationship + " 关联到：{objects}",
         )
+        sentence = template.format(
+            subject=subject,
+            objects="、".join(objects),
+        )
+        sources = list(
+            dict.fromkeys(
+                item.source for item in items if item.source
+            )
+        )
+        source_text = f"（来源：{'；'.join(sources)}）" if sources else ""
+        lines.append(f"- {sentence}{source_text}")
     return "\n".join(lines)
 
 

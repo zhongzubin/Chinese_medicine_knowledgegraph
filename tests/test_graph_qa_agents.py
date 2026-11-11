@@ -11,6 +11,7 @@ from graph_qa.agents import (
     RetrievalAgent,
     RetrievalLoopObservation,
 )
+from graph_qa.agents.evidence_audit import evidence_fallback_answer
 from graph_qa.agents.retrieval import MULTI_HOP_CATALOG
 from graph_qa.entity_linker import EntityIndex, EntityRecord
 from graph_qa.llm import ReasonerError
@@ -829,3 +830,30 @@ def test_evidence_audit_agent_rejects_omitted_support_item():
 
     assert decision.verification.status == "fallback"
     assert "未通过证据编号核验" in decision.verification.message
+
+
+def test_evidence_fallback_answer_uses_chinese_controlled_relation_templates():
+    answer = evidence_fallback_answer(
+        [
+            Evidence(
+                subject="四君子汤",
+                subject_label="Formula",
+                relationship="HAS_INGREDIENT",
+                object="人参",
+                object_label="Herb",
+                source="《局方》",
+            ),
+            Evidence(
+                subject="四君子汤",
+                subject_label="Formula",
+                relationship="HAS_INGREDIENT",
+                object="白术",
+                object_label="Herb",
+                source="《局方》",
+            ),
+        ]
+    )
+
+    assert "四君子汤含有以下成分：人参、白术" in answer
+    assert "来源：《局方》" in answer
+    assert "HAS_INGREDIENT" not in answer

@@ -321,6 +321,11 @@ class PathEvidence(StrictModel):
     target_label: EntityLabel
     source: Optional[str] = Field(default=None, max_length=1000)
 
+# 工作流阶段耗时
+class StageTiming(StrictModel):
+    stage: str = Field(min_length=1, max_length=80)
+    elapsed_ms: float = Field(ge=0)
+
 # 回答断言
 class AnswerClaim(StrictModel):
     text: str = Field(min_length=1, max_length=1000)
