@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Protocol, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from graph_qa.cli import CLIConfigError, build_engine_from_environment
 from graph_qa.models import (
@@ -76,13 +76,49 @@ class ExpectedAggregate(EvaluationModel):
     count: int = Field(ge=0)
 
 
+class ExpectedPathStep(EvaluationModel):
+    subject_label: str
+    relationship: str
+    object_label: str
+
+
 class ExpectedPath(EvaluationModel):
     root_label: str
     root_name: str
-    first_relationship: str
-    intermediate_label: str
-    second_relationship: str
-    target_label: str
+    steps: List[ExpectedPathStep] = Field(default_factory=list)
+    first_relationship: Optional[str] = None
+    intermediate_label: Optional[str] = None
+    second_relationship: Optional[str] = None
+    target_label: Optional[str] = None
+
+    @model_validator(mode="after")
+    def normalize_steps(self) -> "ExpectedPath":
+        if not self.steps:
+            if not all(
+                (
+                    self.first_relationship,
+                    self.intermediate_label,
+                    self.second_relationship,
+                    self.target_label,
+                )
+            ):
+                raise ValueError("期望路径必须包含 steps 或完整的两跳字段")
+            self.steps = [
+                ExpectedPathStep(
+                    subject_label=self.root_label,
+                    relationship=self.first_relationship,
+                    object_label=self.intermediate_label,
+                ),
+                ExpectedPathStep(
+                    subject_label=self.intermediate_label,
+                    relationship=self.second_relationship,
+                    object_label=self.target_label,
+                ),
+            ]
+        if not 2 <= len(self.steps) <= 3:
+            raise ValueError("期望路径必须包含 2 到 3 步")
+        self.target_label = self.steps[-1].object_label
+        return self
 
 
 class EvaluationCase(EvaluationModel):
@@ -393,10 +429,14 @@ def _path_matched(case: EvaluationCase, response: GraphQAResponse) -> Optional[b
         (
             item.root_label,
             item.root,
-            item.first_relationship,
-            item.intermediate_label,
-            item.second_relationship,
-            item.target_label,
+            tuple(
+                (
+                    step.subject_label,
+                    step.relationship,
+                    step.object_label,
+                )
+                for step in item.steps
+            ),
         )
         for item in response.paths
     }
@@ -404,10 +444,14 @@ def _path_matched(case: EvaluationCase, response: GraphQAResponse) -> Optional[b
         (
             expected.root_label,
             expected.root_name,
-            expected.first_relationship,
-            expected.intermediate_label,
-            expected.second_relationship,
-            expected.target_label,
+            tuple(
+                (
+                    step.subject_label,
+                    step.relationship,
+                    step.object_label,
+                )
+                for step in expected.steps
+            ),
         )
         in actual
         for expected in case.expected_paths

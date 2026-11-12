@@ -95,7 +95,7 @@ def context_coverage_count(
     for item in paths:
         if all(
             value in normalized_answer
-            for value in (item.root, item.intermediate, item.target)
+            for value in (item.root, *(step.object for step in item.steps))
         ):
             matched += 1
     return matched
@@ -272,12 +272,13 @@ def path_fallback_answer(paths: Sequence[PathEvidence]) -> str:
     lines = ["根据当前图谱中可验证的路径："]
     for item in paths[:8]:
         source = f"（来源：{item.source}）" if item.source else "（未提供出处）"
+        node_text = item.root
+        for step in item.steps:
+            node_text += (
+                f"-[{step.relationship}]->{step.object}"
+            )
         lines.append(
-            f"- ({item.root}:{item.root_label})"
-            f"-[{item.first_relationship}]->"
-            f"({item.intermediate}:{item.intermediate_label})"
-            f"-[{item.second_relationship}]->"
-            f"({item.target}:{item.target_label}){source}"
+            f"- {node_text}{source}"
         )
     return "\n".join(lines)
 

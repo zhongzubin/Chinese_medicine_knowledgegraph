@@ -14,6 +14,7 @@ from graph_qa.models import (
     Evidence,
     GraphQAResponse,
     PathEvidence,
+    PathStepEvidence,
     QueryInfo,
 )
 
@@ -147,6 +148,52 @@ def test_render_text_includes_multi_hop_path():
     assert "多跳路径" in output
     assert "HAS_INGREDIENT" in output
     assert "HAS_EFFECT" in output
+
+
+def test_render_text_includes_three_step_multi_hop_path():
+    response = GraphQAResponse(
+        question="四君子汤所含药材治疗的疾病有哪些症状？",
+        answer="四君子汤所含药材治疗的疾病可出现乏力。",
+        grounded=True,
+        paths=[
+            PathEvidence(
+                root="四君子汤",
+                root_label="Formula",
+                target="乏力",
+                target_label="Symptom",
+                steps=[
+                    PathStepEvidence(
+                        subject="四君子汤",
+                        subject_label="Formula",
+                        relationship="HAS_INGREDIENT",
+                        object="人参",
+                        object_label="Herb",
+                    ),
+                    PathStepEvidence(
+                        subject="人参",
+                        subject_label="Herb",
+                        relationship="TREATS_DISEASE",
+                        object="气虚证",
+                        object_label="Disease",
+                    ),
+                    PathStepEvidence(
+                        subject="气虚证",
+                        subject_label="Disease",
+                        relationship="HAS_SYMPTOM",
+                        object="乏力",
+                        object_label="Symptom",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    output = render_text(response)
+
+    assert "HAS_INGREDIENT" in output
+    assert "TREATS_DISEASE" in output
+    assert "HAS_SYMPTOM" in output
+    assert "乏力:Symptom" in output
 
 
 def test_render_text_includes_answer_verification():

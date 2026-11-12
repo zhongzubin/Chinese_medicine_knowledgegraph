@@ -154,6 +154,10 @@ def build_engine_from_environment(
     query_timeout = _read_positive_float("GRAPH_QA_QUERY_TIMEOUT_SECONDS", 8.0)
     query_attempts = _read_positive_int("GRAPH_QA_CYPHER_MAX_ATTEMPTS", 3)
     entity_limit = _read_positive_int("GRAPH_QA_ENTITY_LIMIT", 10)
+    dynamic_multi_hop_enabled = _read_bool(
+        "GRAPH_QA_DYNAMIC_MULTI_HOP_ENABLED",
+        True,
+    )
 
     try:
         reasoner = LangChainQAReasoner()
@@ -182,6 +186,7 @@ def build_engine_from_environment(
             entity_index=entity_index,
             max_attempts=query_attempts,
             entity_limit=entity_limit,
+            dynamic_multi_hop_enabled=dynamic_multi_hop_enabled,
         )
     except RepositoryError:
         driver.close()
@@ -232,13 +237,13 @@ def render_text(response: GraphQAResponse, show_query: bool = False) -> str:
         lines.extend(["", "多跳路径："])
         for item in response.paths:
             source = f"（来源：{item.source}）" if item.source else ""
-            lines.append(
-                f"- ({item.root}:{item.root_label})"
-                f"-[{item.first_relationship}]->"
-                f"({item.intermediate}:{item.intermediate_label})"
-                f"-[{item.second_relationship}]->"
-                f"({item.target}:{item.target_label}){source}"
-            )
+            path_text = f"({item.root}:{item.root_label})"
+            for step in item.steps:
+                path_text += (
+                    f"-[{step.relationship}]->"
+                    f"({step.object}:{step.object_label})"
+                )
+            lines.append(f"- {path_text}{source}")
     if response.evidence:
         lines.extend(["", "图谱证据："])
         for item in response.evidence:

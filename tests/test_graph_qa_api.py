@@ -19,6 +19,7 @@ from graph_qa.models import (
     Evidence,
     GraphQAResponse,
     PathEvidence,
+    PathStepEvidence,
     QueryInfo,
 )
 from graph_qa.redis_limits import (
@@ -387,6 +388,61 @@ def test_qa_serializes_multi_hop_paths():
 
     assert response.status_code == 200
     assert response.json()["paths"][0]["intermediate"] == "人参"
+    assert len(response.json()["paths"][0]["steps"]) == 2
+
+
+def test_qa_serializes_three_step_paths():
+    engine = FakeEngine(
+        response=GraphQAResponse(
+            question="四君子汤所含药材治疗的疾病有哪些症状？",
+            answer="四君子汤所含药材治疗的疾病可出现乏力。",
+            grounded=True,
+            paths=[
+                PathEvidence(
+                    root="四君子汤",
+                    root_label="Formula",
+                    target="乏力",
+                    target_label="Symptom",
+                    steps=[
+                        PathStepEvidence(
+                            subject="四君子汤",
+                            subject_label="Formula",
+                            relationship="HAS_INGREDIENT",
+                            object="人参",
+                            object_label="Herb",
+                        ),
+                        PathStepEvidence(
+                            subject="人参",
+                            subject_label="Herb",
+                            relationship="TREATS_DISEASE",
+                            object="气虚证",
+                            object_label="Disease",
+                        ),
+                        PathStepEvidence(
+                            subject="气虚证",
+                            subject_label="Disease",
+                            relationship="HAS_SYMPTOM",
+                            object="乏力",
+                            object_label="Symptom",
+                        ),
+                    ],
+                )
+            ],
+        )
+    )
+
+    with TestClient(make_app(engine, FakeLimitStore())) as client:
+        response = client.post(
+            "/api/v1/qa",
+            headers={"X-API-Key": TEST_API_KEY},
+            json={"question": "四君子汤所含药材治疗的疾病有哪些症状？"},
+        )
+
+    assert response.status_code == 200
+    path = response.json()["paths"][0]
+    assert len(path["steps"]) == 3
+    assert path["first_relationship"] is None
+    assert path["steps"][-1]["object"] == "乏力"
 
 
 def test_qa_serializes_answer_verification():

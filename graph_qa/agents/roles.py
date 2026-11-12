@@ -119,6 +119,7 @@ class QAAgentTeam:
     reasoner: object
     schema: GraphSchema
     max_results: int = 50
+    dynamic_multi_hop_enabled: bool = True
     dialogue: DialogueAgent = field(init=False)
     intent: IntentAgent = field(init=False)
     entity: EntityAgent = field(init=False)
@@ -135,6 +136,7 @@ class QAAgentTeam:
             reasoner=self.reasoner,
             schema=self.schema,
             max_results=self.max_results,
+            dynamic_multi_hop_enabled=self.dynamic_multi_hop_enabled,
         )
         self.evidence_audit = EvidenceAuditAgent()
         self.answer = AnswerAgent(self.reasoner)
