@@ -87,6 +87,7 @@ ENTITY_LABEL_DISPLAY_NAMES = {
     "Effect": "功效",
     "Source": "文献",
 }
+MULTI_HOP_MAX_STEPS = 3
 MULTI_HOP_CATALOG: Tuple[
     Tuple[
         Tuple[EntityLabel, str, EntityLabel],
@@ -117,7 +118,7 @@ MULTI_HOP_CATALOG: Tuple[
     ),
 )
 RETRIEVAL_PLAN_LABELS: Mapping[str, str] = {
-    "controlled_multi_hop": "受控两跳",
+    "controlled_multi_hop": "受控多跳",
     "controlled_attribute": "图谱属性",
     "controlled_aggregate": "受控统计",
     "controlled_multi_condition_list": "多条件列表",
@@ -181,11 +182,17 @@ def has_tcm_query_cue(question: str) -> bool:
 
 
 def _requested_relations(question: str) -> Set[str]:
-    return {
+    relations = {
         relation
         for terms, relation in RELATION_TERM_MAP
         if any(term in question for term in terms)
     }
+    if (
+        any(term in question for term in ("缓解", "改善"))
+        and "HAS_SYMPTOM" in relations
+    ):
+        relations.discard("HAS_SYMPTOM")
+    return relations
 
 
 def _entity_hints(question: str) -> Set[str]:
@@ -194,6 +201,93 @@ def _entity_hints(question: str) -> Set[str]:
         for terms, label in ENTITY_HINT_MAP
         if any(term in question for term in terms)
     }
+
+
+def _relation_positions(question: str) -> Dict[str, int]:
+    positions = {}
+    for terms, relation in RELATION_TERM_MAP:
+        matches = [
+            question.find(term)
+            for term in terms
+            if term in question
+        ]
+        if matches:
+            positions[relation] = min(matches)
+    return positions
+
+
+def _target_label_hint(question: str) -> Optional[str]:
+    candidates = []
+    for terms, label in ENTITY_HINT_MAP:
+        for term in terms:
+            position = question.rfind(term)
+            if position >= 0:
+                candidates.append((position, len(term), label))
+    if not candidates:
+        return None
+    return max(candidates)[2]
+
+
+def _schema_paths(
+    schema: GraphSchema,
+    start_label: str,
+    *,
+    max_steps: int,
+) -> List[Tuple[MultiHopStep, ...]]:
+    patterns_by_subject: Dict[str, List[Tuple[str, str, str]]] = {}
+    for pattern in sorted(schema.triple_patterns):
+        patterns_by_subject.setdefault(pattern[0], []).append(pattern)
+
+    results: List[Tuple[MultiHopStep, ...]] = []
+
+    def visit(
+        current_label: str,
+        visited_labels: Tuple[str, ...],
+        used_relations: Set[str],
+        steps: Tuple[MultiHopStep, ...],
+    ) -> None:
+        for subject, relationship, object_label in patterns_by_subject.get(
+            current_label,
+            [],
+        ):
+            if (
+                object_label in visited_labels
+                or relationship in used_relations
+            ):
+                continue
+            step = MultiHopStep(
+                subject_label=subject,
+                relationship=relationship,
+                object_label=object_label,
+            )
+            next_steps = (*steps, step)
+            if len(next_steps) >= 2:
+                results.append(next_steps)
+            if len(next_steps) < max_steps:
+                visit(
+                    object_label,
+                    (*visited_labels, object_label),
+                    {*used_relations, relationship},
+                    next_steps,
+                )
+
+    visit(start_label, (start_label,), set(), ())
+    return results
+
+
+def _multi_hop_description(
+    anchor_names: Sequence[str],
+    steps: Sequence[MultiHopStep],
+) -> str:
+    suffix = {
+        "HAS_EFFECT": "关联的功效",
+        "TREATS_DISEASE": "可治疗的疾病",
+        "ALLEVIATES_SYMPTOM": "可缓解的症状",
+        "HAS_SYMPTOM": "治疗疾病的相关症状",
+        "FROM_SOURCE": "相关来源",
+        "HAS_INGREDIENT": "包含的成分",
+    }.get(steps[-1].relationship, "关联结果")
+    return f"{'、'.join(anchor_names)}{suffix}"
 
 
 def _is_count_question(question: str) -> bool:
@@ -261,6 +355,7 @@ class RetrievalAgent:
     reasoner: object
     schema: GraphSchema
     max_results: int = 50
+    dynamic_multi_hop_enabled: bool = True
     descriptor: AgentDescriptor = field(
         default=AgentDescriptor(
             name="retrieval",
@@ -290,12 +385,27 @@ class RetrievalAgent:
         self,
         request: RetrievalPlanningInput,
     ) -> RetrievalPlanningResult:
+        requested_relations = _requested_relations(request.question)
+        if len(requested_relations) > MULTI_HOP_MAX_STEPS:
+            return RetrievalPlanningResult(
+                plan_kind="rejected",
+                query_attempts=request.query_attempts,
+                validation_errors=["多跳路径超过 3 步上限"],
+                last_error_code=ErrorCode.CYPHER_REJECTED,
+            )
         multi_hop_plan = self._build_multi_hop_plan(request)
         if multi_hop_plan is not None:
             return self._controlled_result(
                 "controlled_multi_hop",
                 multi_hop_plan,
                 request,
+            )
+        if self.dynamic_multi_hop_enabled and len(requested_relations) >= 2:
+            return RetrievalPlanningResult(
+                plan_kind="rejected",
+                query_attempts=request.query_attempts,
+                validation_errors=["问题包含多个关系，但没有唯一安全多跳路径"],
+                last_error_code=ErrorCode.CYPHER_REJECTED,
             )
 
         attribute_plan = self._build_attribute_plan(request)
@@ -617,6 +727,83 @@ class RetrievalAgent:
         )
 
     def _build_multi_hop_plan(
+        self,
+        request: RetrievalPlanningInput,
+    ) -> Optional[MultiHopQueryPlan]:
+        if self.dynamic_multi_hop_enabled:
+            return self._build_dynamic_multi_hop_plan(request)
+        return self._build_fixed_two_hop_plan(request)
+
+    def _build_dynamic_multi_hop_plan(
+        self,
+        request: RetrievalPlanningInput,
+    ) -> Optional[MultiHopQueryPlan]:
+        requested_relations = _requested_relations(request.question)
+        if not 2 <= len(requested_relations) <= MULTI_HOP_MAX_STEPS:
+            return None
+        relation_positions = _relation_positions(request.question)
+        if not requested_relations.issubset(relation_positions):
+            return None
+
+        linked_by_label: Dict[str, List[LinkedEntity]] = {}
+        for entity in request.linked_entities:
+            linked_by_label.setdefault(entity.label, []).append(entity)
+        if not linked_by_label:
+            return None
+
+        target_hint = _target_label_hint(request.question)
+        candidates = {}
+        for start_label in sorted(linked_by_label):
+            for steps in _schema_paths(
+                self.schema,
+                start_label,
+                max_steps=MULTI_HOP_MAX_STEPS,
+            ):
+                relationships = [step.relationship for step in steps]
+                if set(relationships) != requested_relations:
+                    continue
+                positions = [
+                    relation_positions[relationship]
+                    for relationship in relationships
+                ]
+                if any(
+                    previous >= current
+                    for previous, current in zip(positions, positions[1:])
+                ):
+                    continue
+                if target_hint and steps[-1].object_label != target_hint:
+                    continue
+                key = (
+                    start_label,
+                    tuple(
+                        (
+                            step.subject_label,
+                            step.relationship,
+                            step.object_label,
+                        )
+                        for step in steps
+                    ),
+                )
+                candidates[key] = steps
+
+        if len(candidates) != 1:
+            return None
+        (start_label, _steps_key), steps = next(iter(candidates.items()))
+        entities = linked_by_label[start_label]
+        anchor_names = sorted({item.name for item in entities})
+        return MultiHopQueryPlan(
+            steps=list(steps),
+            used_entities=[
+                UsedEntityRef(label=item.label, name=item.name)
+                for item in sorted(
+                    entities,
+                    key=lambda entity: (entity.label, entity.name),
+                )
+            ],
+            description=_multi_hop_description(anchor_names, steps),
+        )
+
+    def _build_fixed_two_hop_plan(
         self,
         request: RetrievalPlanningInput,
     ) -> Optional[MultiHopQueryPlan]:

@@ -6,6 +6,7 @@ from graph_qa.streamlit_app import (
     _compact_session_id,
     _evidence_tab_specs,
     _follow_up_questions,
+    _path_evidence_card_html,
     _progress_timeline_html,
     _relation_label,
     _stage_display_label,
@@ -121,7 +122,7 @@ def test_stage_display_label_only_adds_safe_retrieval_plan_type():
             "stage": "plan_cypher",
             "label": "生成图谱查询",
             "plan_kind": "controlled_multi_hop",
-            "plan_label": "受控两跳",
+            "plan_label": "受控多跳",
         }
     )
     generic_label = _stage_display_label(
@@ -140,7 +141,7 @@ def test_stage_display_label_only_adds_safe_retrieval_plan_type():
         }
     )
 
-    assert plan_label == "生成图谱查询（受控两跳）"
+    assert plan_label == "生成图谱查询（受控多跳）"
     assert generic_label == "校验查询安全"
     assert observe_label == "观察检索结果并决定下一步（重新规划）"
 
@@ -165,6 +166,39 @@ def test_evidence_tab_specs_only_returns_available_groups():
         ("facts", "属性事实", 2),
         ("paths", "多跳路径", 1),
     ]
+
+
+def test_three_step_path_card_renders_all_nodes_and_relations():
+    markup = _path_evidence_card_html(
+        {
+            "root": "四君子汤",
+            "root_label": "Formula",
+            "steps": [
+                {
+                    "relationship": "HAS_INGREDIENT",
+                    "object": "人参",
+                    "object_label": "Herb",
+                },
+                {
+                    "relationship": "TREATS_DISEASE",
+                    "object": "气虚证",
+                    "object_label": "Disease",
+                },
+                {
+                    "relationship": "HAS_SYMPTOM",
+                    "object": "乏力",
+                    "object_label": "Symptom",
+                },
+            ],
+            "source": None,
+        }
+    )
+
+    assert markup.count("kg-path-node") == 4
+    assert "包含 →" in markup
+    assert "治疗疾病 →" in markup
+    assert "包含症状 →" in markup
+    assert "乏力" in markup
 
 
 def test_verification_ratio_handles_empty_and_complete_coverage():

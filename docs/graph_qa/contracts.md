@@ -377,7 +377,7 @@ MultiConditionQueryPlan
 
 ### 4.11 受控多跳路径
 
-两跳查询使用显式、Schema 白名单内的路径计划：
+多跳查询使用显式、Schema 白名单内的 2～3 步路径计划：
 
 ```text
 MultiHopStep
@@ -386,30 +386,45 @@ MultiHopStep
 - object_label: str
 
 MultiHopQueryPlan
-- steps: list[MultiHopStep], 当前固定为 2 步
+- steps: list[MultiHopStep], 2 到 3 步
 - used_entities: list[UsedEntityRef]
 - description: str
+
+PathStepEvidence
+- subject: str
+- subject_label: str
+- relationship: str
+- object: str
+- object_label: str
 
 PathEvidence
 - root: str
 - root_label: str
-- first_relationship: str
-- intermediate: str
-- intermediate_label: str
-- second_relationship: str
+- steps: list[PathStepEvidence], 2 到 3 步
 - target: str
 - target_label: str
 - source: str | null
+- first_relationship: str | null
+- intermediate: str | null
+- intermediate_label: str | null
+- second_relationship: str | null
 ```
 
-当前只允许以下两跳模式：
+动态路径由 `GraphSchema.triple_patterns` 有界搜索得到，并满足：
 
-1. `Formula -HAS_INGREDIENT-> Herb -HAS_EFFECT-> Effect`
-2. `Formula -HAS_INGREDIENT-> Herb -TREATS_DISEASE-> Disease`
-3. `Formula -HAS_INGREDIENT-> Herb -ALLEVIATES_SYMPTOM-> Symptom`
-4. `Herb -TREATS_DISEASE-> Disease -HAS_SYMPTOM-> Symptom`
+- 起点来自已链接实体标签。
+- 最大 3 步。
+- 节点标签和关系类型均不重复。
+- 每一步都存在于 Schema。
+- 路径关系集合和关系顺序与问题一致。
+- 目标标签提示存在时，终点标签必须匹配。
+- 最终结构候选必须唯一。
 
-两步节点链必须连续，每一步都必须通过 Schema 校验。`GraphQAResponse.paths` 默认空数组；任意深度、变量长度路径和模型自由规划不在当前契约内。
+节点链必须连续，每一步都必须通过 Schema 和执行层校验。`GraphQAResponse.paths` 默认空数组；变量长度路径、循环、超过 3 步和模型自由生成关系组合不在当前契约内。
+
+`steps` 是统一路径结构；两跳响应继续填充旧字段，三步响应的旧字段为 `null`。该变化为向后兼容字段增加，`schema_version` 保持 `1.0`。
+
+`GRAPH_QA_DYNAMIC_MULTI_HOP_ENABLED=false` 时恢复原先四条固定两跳路径；关闭开关不改变任何安全校验。
 
 ### 4.12 结构化回答
 

@@ -22,6 +22,8 @@ from graph_qa.models import (
     GraphQAResponse,
     IntentResult,
     LinkedEntity,
+    PathEvidence,
+    PathStepEvidence,
     QueryInfo,
 )
 
@@ -65,7 +67,7 @@ def test_product_quality_cases_are_valid():
         Path("evaluation/product_quality_cases.jsonl")
     )
 
-    assert len(cases) == 200
+    assert len(cases) == 220
     assert {case.category for case in cases} == {
         "herb_attribute",
         "formula_attribute",
@@ -74,6 +76,8 @@ def test_product_quality_cases_are_valid():
         "aggregate_count",
         "multi_condition_list",
         "multi_hop",
+        "dynamic_multi_hop",
+        "dynamic_multi_hop_negative",
         "semantic_synonym",
         "unknown_entity",
         "no_evidence",
@@ -87,7 +91,8 @@ def test_product_quality_cases_are_valid():
         or case.expected_answer_contains
         or case.expected_patterns
         or case.expected_paths
-        or case.expected_outcome in {"clarification", "no_evidence"}
+        or case.expected_outcome
+        in {"clarification", "no_evidence", "safe_rejection"}
         for case in cases
     )
     assert sum(case.category == "unknown_entity" for case in cases) == 20
@@ -569,6 +574,83 @@ def test_expected_multi_hop_path_matches_response():
     assert summary["path_cases_evaluated"] == 1
     assert summary["path_match_rate_product"] == 1.0
     assert summary["grounded_evidence_coverage"] == 1.0
+
+
+def test_expected_three_step_path_matches_response():
+    case = EvaluationCase(
+        id="three-step-path",
+        category="multi_hop",
+        question="四君子汤所含药材治疗的疾病有哪些症状？",
+        expected_intent=True,
+        expected_entities=[{"label": "Formula", "name": "四君子汤"}],
+        expected_paths=[
+            {
+                "root_label": "Formula",
+                "root_name": "四君子汤",
+                "steps": [
+                    {
+                        "subject_label": "Formula",
+                        "relationship": "HAS_INGREDIENT",
+                        "object_label": "Herb",
+                    },
+                    {
+                        "subject_label": "Herb",
+                        "relationship": "TREATS_DISEASE",
+                        "object_label": "Disease",
+                    },
+                    {
+                        "subject_label": "Disease",
+                        "relationship": "HAS_SYMPTOM",
+                        "object_label": "Symptom",
+                    },
+                ],
+            }
+        ],
+        expected_outcome="grounded_answer",
+    )
+    response = GraphQAResponse(
+        question=case.question,
+        answer="四君子汤所含药材治疗的疾病可出现乏力。",
+        grounded=True,
+        paths=[
+            PathEvidence(
+                root="四君子汤",
+                root_label="Formula",
+                target="乏力",
+                target_label="Symptom",
+                steps=[
+                    PathStepEvidence(
+                        subject="四君子汤",
+                        subject_label="Formula",
+                        relationship="HAS_INGREDIENT",
+                        object="人参",
+                        object_label="Herb",
+                    ),
+                    PathStepEvidence(
+                        subject="人参",
+                        subject_label="Herb",
+                        relationship="TREATS_DISEASE",
+                        object="气虚证",
+                        object_label="Disease",
+                    ),
+                    PathStepEvidence(
+                        subject="气虚证",
+                        subject_label="Disease",
+                        relationship="HAS_SYMPTOM",
+                        object="乏力",
+                        object_label="Symptom",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    summary = summarize(
+        evaluate_cases(FakeEvaluationEngine({case.question: response}), [case])
+    )
+
+    assert summary["path_cases_evaluated"] == 1
+    assert summary["path_match_rate_product"] == 1.0
 
 
 def test_query_metrics_keep_execution_failure_after_valid_cypher():

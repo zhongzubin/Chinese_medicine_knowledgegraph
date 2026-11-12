@@ -28,6 +28,7 @@ from graph_qa.models import (
     MultiConditionQueryPlan,
     MultiHopQueryPlan,
     PathEvidence,
+    PathStepEvidence,
     RetrievalPlanningInput,
     RetrievalPlanningResult,
     UsedEntityRef,
@@ -281,6 +282,82 @@ def test_retrieval_agent_selects_controlled_plan_without_model_fallback(
     assert result.plan_kind == expected_kind
     assert isinstance(result.plan, expected_type)
     assert result.query_attempts == 0
+    assert reasoner.calls == []
+
+
+def test_retrieval_agent_plans_three_step_schema_path():
+    agent = RetrievalAgent(
+        reasoner=PlanReasoner(),
+        schema=make_schema(),
+        max_results=50,
+        dynamic_multi_hop_enabled=True,
+    )
+
+    result = agent.plan(
+        RetrievalPlanningInput(
+            question="四君子汤所含药材治疗的疾病有哪些症状？",
+            linked_entities=[linked_entity("Formula", "四君子汤")],
+        )
+    )
+
+    assert result.plan_kind == "controlled_multi_hop"
+    assert isinstance(result.plan, MultiHopQueryPlan)
+    assert [
+        (
+            step.subject_label,
+            step.relationship,
+            step.object_label,
+        )
+        for step in result.plan.steps
+    ] == [
+        ("Formula", "HAS_INGREDIENT", "Herb"),
+        ("Herb", "TREATS_DISEASE", "Disease"),
+        ("Disease", "HAS_SYMPTOM", "Symptom"),
+    ]
+
+
+def test_dynamic_multi_hop_can_fall_back_to_fixed_two_hop():
+    agent = RetrievalAgent(
+        reasoner=PlanReasoner(),
+        schema=make_schema(),
+        max_results=50,
+        dynamic_multi_hop_enabled=False,
+    )
+
+    result = agent.plan(
+        RetrievalPlanningInput(
+            question="四君子汤所含药材有什么功效？",
+            linked_entities=[linked_entity("Formula", "四君子汤")],
+        )
+    )
+
+    assert result.plan_kind == "controlled_multi_hop"
+    assert isinstance(result.plan, MultiHopQueryPlan)
+    assert len(result.plan.steps) == 2
+
+
+def test_dynamic_multi_hop_rejects_relation_order_mismatch():
+    reasoner = PlanReasoner()
+    agent = RetrievalAgent(
+        reasoner=reasoner,
+        schema=make_schema(),
+        max_results=50,
+        dynamic_multi_hop_enabled=True,
+    )
+
+    result = agent.plan(
+        RetrievalPlanningInput(
+            question="白通加猪胆汁汤治疗少阴病所含人尿有哪些症状？",
+            linked_entities=[linked_entity("Formula", "白通加猪胆汁汤")],
+        )
+    )
+
+    assert result.plan_kind == "rejected"
+    assert result.plan is None
+    assert result.last_error_code == ErrorCode.CYPHER_REJECTED
+    assert result.validation_errors == [
+        "问题包含多个关系，但没有唯一安全多跳路径"
+    ]
     assert reasoner.calls == []
 
 
@@ -857,3 +934,50 @@ def test_evidence_fallback_answer_uses_chinese_controlled_relation_templates():
     assert "四君子汤含有以下成分：人参、白术" in answer
     assert "来源：《局方》" in answer
     assert "HAS_INGREDIENT" not in answer
+
+
+def test_path_evidence_three_steps_and_legacy_two_step_compatibility():
+    three_step = PathEvidence(
+        root="四君子汤",
+        root_label="Formula",
+        target="乏力",
+        target_label="Symptom",
+        steps=[
+            PathStepEvidence(
+                subject="四君子汤",
+                subject_label="Formula",
+                relationship="HAS_INGREDIENT",
+                object="人参",
+                object_label="Herb",
+            ),
+            PathStepEvidence(
+                subject="人参",
+                subject_label="Herb",
+                relationship="TREATS_DISEASE",
+                object="气虚证",
+                object_label="Disease",
+            ),
+            PathStepEvidence(
+                subject="气虚证",
+                subject_label="Disease",
+                relationship="HAS_SYMPTOM",
+                object="乏力",
+                object_label="Symptom",
+            ),
+        ],
+    )
+    two_step = PathEvidence(
+        root="四君子汤",
+        root_label="Formula",
+        first_relationship="HAS_INGREDIENT",
+        intermediate="人参",
+        intermediate_label="Herb",
+        second_relationship="HAS_EFFECT",
+        target="补气",
+        target_label="Effect",
+    )
+
+    assert len(three_step.steps) == 3
+    assert three_step.first_relationship is None
+    assert two_step.first_relationship == "HAS_INGREDIENT"
+    assert len(two_step.steps) == 2

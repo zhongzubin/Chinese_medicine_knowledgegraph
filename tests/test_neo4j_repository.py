@@ -62,6 +62,8 @@ def make_schema() -> GraphSchema:
             "relationship_types": [
                 {"type": "HAS_EFFECT"},
                 {"type": "HAS_INGREDIENT"},
+                {"type": "TREATS_DISEASE"},
+                {"type": "HAS_SYMPTOM"},
             ],
             "triple_patterns": [
                 {
@@ -73,6 +75,16 @@ def make_schema() -> GraphSchema:
                     "subject_label": "Formula",
                     "relationship_type": "HAS_INGREDIENT",
                     "object_label": "Herb",
+                },
+                {
+                    "subject_label": "Herb",
+                    "relationship_type": "TREATS_DISEASE",
+                    "object_label": "Disease",
+                },
+                {
+                    "subject_label": "Disease",
+                    "relationship_type": "HAS_SYMPTOM",
+                    "object_label": "Symptom",
                 },
             ],
         }
@@ -453,3 +465,83 @@ def test_execute_multi_hop_returns_two_step_paths():
     assert "first:HAS_INGREDIENT" in query
     assert "second:HAS_EFFECT" in query
     assert parameters == {"entity_names": ["四君子汤"]}
+
+
+def test_execute_multi_hop_supports_three_step_paths():
+    rows = [
+        {
+            "root": "四君子汤",
+            "root_label": "Formula",
+            "relationship_types": [
+                "HAS_INGREDIENT",
+                "TREATS_DISEASE",
+                "HAS_SYMPTOM",
+            ],
+            "node_names": ["人参", "气虚证", "乏力"],
+            "node_labels": ["Herb", "Disease", "Symptom"],
+            "target": "乏力",
+            "target_label": "Symptom",
+            "sources": [],
+        }
+    ]
+    session = FakeSession(query_rows=rows)
+    repository, _driver = make_repository(session)
+    plan = MultiHopQueryPlan(
+        steps=[
+            MultiHopStep(
+                subject_label="Formula",
+                relationship="HAS_INGREDIENT",
+                object_label="Herb",
+            ),
+            MultiHopStep(
+                subject_label="Herb",
+                relationship="TREATS_DISEASE",
+                object_label="Disease",
+            ),
+            MultiHopStep(
+                subject_label="Disease",
+                relationship="HAS_SYMPTOM",
+                object_label="Symptom",
+            ),
+        ],
+        used_entities=[UsedEntityRef(label="Formula", name="四君子汤")],
+        description="四君子汤所含药材治疗疾病的相关症状",
+    )
+
+    result = repository.execute_multi_hop(plan)
+
+    assert result.rows == rows
+    query, parameters = session.transaction.queries[0]
+    assert "first:HAS_INGREDIENT" in query
+    assert "second:TREATS_DISEASE" in query
+    assert "third:HAS_SYMPTOM" in query
+    assert "middle_2.name" in query
+    assert "[type(first), type(second), type(third)]" in query
+    assert (
+        "WITH root, middle_1, middle_2, target, first, second, third"
+        in query
+    )
+    assert parameters == {"entity_names": ["四君子汤"]}
+
+
+def test_execute_multi_hop_rejects_discontinuous_steps():
+    repository, _driver = make_repository(FakeSession())
+    plan = MultiHopQueryPlan(
+        steps=[
+            MultiHopStep(
+                subject_label="Formula",
+                relationship="HAS_INGREDIENT",
+                object_label="Herb",
+            ),
+            MultiHopStep(
+                subject_label="Disease",
+                relationship="HAS_SYMPTOM",
+                object_label="Symptom",
+            ),
+        ],
+        used_entities=[UsedEntityRef(label="Formula", name="四君子汤")],
+        description="不连续路径",
+    )
+
+    with pytest.raises(RepositoryError, match="节点链不连续"):
+        repository.execute_multi_hop(plan)

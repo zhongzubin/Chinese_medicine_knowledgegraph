@@ -112,6 +112,9 @@ def make_schema() -> GraphSchema:
             "relationship_types": [
                 {"type": "HAS_EFFECT"},
                 {"type": "HAS_INGREDIENT"},
+                {"type": "TREATS_DISEASE"},
+                {"type": "ALLEVIATES_SYMPTOM"},
+                {"type": "HAS_SYMPTOM"},
                 {"type": "FROM_SOURCE"},
             ],
             "triple_patterns": [
@@ -124,6 +127,16 @@ def make_schema() -> GraphSchema:
                     "subject_label": "Formula",
                     "relationship_type": "HAS_INGREDIENT",
                     "object_label": "Herb",
+                },
+                {
+                    "subject_label": "Herb",
+                    "relationship_type": "TREATS_DISEASE",
+                    "object_label": "Disease",
+                },
+                {
+                    "subject_label": "Disease",
+                    "relationship_type": "HAS_SYMPTOM",
+                    "object_label": "Symptom",
                 },
                 {
                     "subject_label": "Herb",
@@ -283,6 +296,7 @@ class FakeRepository:
         self.aggregate_plans = []
         self.multi_condition_calls = 0
         self.multi_hop_calls = 0
+        self.multi_hop_plans = []
         self.closed = False
 
     def load_entity_index(self):
@@ -359,8 +373,9 @@ class FakeRepository:
 
     def execute_multi_hop(self, plan) -> QueryResult:
         self.multi_hop_calls += 1
+        self.multi_hop_plans.append(plan)
         return QueryResult(
-            cypher="MATCH (root)-[first]->(middle)-[second]->(target)",
+            cypher="MATCH path",
             parameters={
                 "entity_names": [
                     entity.name
@@ -750,10 +765,12 @@ def test_multi_hop_question_returns_paths_and_deterministic_answer():
             {
                 "root": "四君子汤",
                 "root_label": "Formula",
-                "first_relationship": "HAS_INGREDIENT",
-                "intermediate": "人参",
-                "intermediate_label": "Herb",
-                "second_relationship": "HAS_EFFECT",
+                    "relationship_types": [
+                        "HAS_INGREDIENT",
+                        "HAS_EFFECT",
+                    ],
+                    "node_names": ["人参", "补气"],
+                    "node_labels": ["Herb", "Effect"],
                 "target": "补气",
                 "target_label": "Effect",
                 "sources": [],
@@ -778,9 +795,63 @@ def test_multi_hop_question_returns_paths_and_deterministic_answer():
     assert response.verification is not None
     assert response.verification.path_items == 1
     assert response.verification.status == "passed"
-    assert "人参：补气" in response.answer
+    assert "四君子汤 → 人参：相关功效：补气" in response.answer
     assert repository.multi_hop_calls == 1
     assert reasoner.plan_calls == 0
+    assert reasoner.answer_calls == 0
+
+
+def test_three_step_multi_hop_returns_complete_path_evidence():
+    reasoner = FakeReasoner(intent=tcm_intent())
+    repository = FakeRepository(
+        multi_hop_rows=[
+            {
+                "root": "四君子汤",
+                "root_label": "Formula",
+                "relationship_types": [
+                    "HAS_INGREDIENT",
+                    "TREATS_DISEASE",
+                    "HAS_SYMPTOM",
+                ],
+                "node_names": ["人参", "气虚证", "乏力"],
+                "node_labels": ["Herb", "Disease", "Symptom"],
+                "target": "乏力",
+                "target_label": "Symptom",
+                "sources": [],
+            }
+        ]
+    )
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=repository,
+        schema=make_schema(),
+        entity_index=make_formula_index(),
+        dynamic_multi_hop_enabled=True,
+    )
+
+    response = engine.answer(
+        "四君子汤所含药材治疗的疾病有哪些症状？"
+    )
+
+    assert response.grounded is True
+    assert response.error is None
+    assert len(response.paths) == 1
+    assert [
+        (
+            step.subject,
+            step.relationship,
+            step.object,
+        )
+        for step in response.paths[0].steps
+    ] == [
+        ("四君子汤", "HAS_INGREDIENT", "人参"),
+        ("人参", "TREATS_DISEASE", "气虚证"),
+        ("气虚证", "HAS_SYMPTOM", "乏力"),
+    ]
+    assert response.paths[0].first_relationship is None
+    assert "四君子汤 → 人参 → 气虚证：可能出现的症状：乏力" in response.answer
+    assert repository.multi_hop_calls == 1
+    assert len(repository.multi_hop_plans[0].steps) == 3
     assert reasoner.answer_calls == 0
 
 

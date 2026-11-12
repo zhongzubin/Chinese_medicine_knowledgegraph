@@ -155,7 +155,7 @@ class MultiHopStep(StrictModel):
 
 
 class MultiHopQueryPlan(StrictModel):
-    steps: List[MultiHopStep] = Field(min_length=2, max_length=2)
+    steps: List[MultiHopStep] = Field(min_length=2, max_length=3)
     used_entities: List[UsedEntityRef] = Field(min_length=1)
     description: str = Field(min_length=1, max_length=160)
 
@@ -309,17 +309,83 @@ class AggregateFact(StrictModel):
     count: int = Field(ge=0)
     description: str = Field(min_length=1, max_length=160)
 
+class PathStepEvidence(StrictModel):
+    subject: str = Field(min_length=1, max_length=100)
+    subject_label: EntityLabel
+    relationship: str = Field(min_length=1, max_length=80)
+    object: str = Field(min_length=1, max_length=100)
+    object_label: EntityLabel
+
+
 # 路径证据
 class PathEvidence(StrictModel):
     root: str = Field(min_length=1, max_length=100)
     root_label: EntityLabel
-    first_relationship: str = Field(min_length=1, max_length=80)
-    intermediate: str = Field(min_length=1, max_length=100)
-    intermediate_label: EntityLabel
-    second_relationship: str = Field(min_length=1, max_length=80)
     target: str = Field(min_length=1, max_length=100)
     target_label: EntityLabel
     source: Optional[str] = Field(default=None, max_length=1000)
+    steps: List[PathStepEvidence] = Field(default_factory=list)
+    # 兼容两跳旧字段；steps 是后续通用路径结构
+    first_relationship: Optional[str] = Field(default=None, max_length=80)
+    intermediate: Optional[str] = Field(default=None, max_length=100)
+    intermediate_label: Optional[EntityLabel] = None
+    second_relationship: Optional[str] = Field(default=None, max_length=80)
+
+    @model_validator(mode="after")
+    def validate_path(self) -> "PathEvidence":
+        if not self.steps:
+            if not all(
+                (
+                    self.first_relationship,
+                    self.intermediate,
+                    self.intermediate_label,
+                    self.second_relationship,
+                )
+            ):
+                raise ValueError("路径证据必须包含 steps 或完整的两跳兼容字段")
+            self.steps = [
+                PathStepEvidence(
+                    subject=self.root,
+                    subject_label=self.root_label,
+                    relationship=self.first_relationship,
+                    object=self.intermediate,
+                    object_label=self.intermediate_label,
+                ),
+                PathStepEvidence(
+                    subject=self.intermediate,
+                    subject_label=self.intermediate_label,
+                    relationship=self.second_relationship,
+                    object=self.target,
+                    object_label=self.target_label,
+                ),
+            ]
+
+        if not 2 <= len(self.steps) <= 3:
+            raise ValueError("路径证据必须包含 2 到 3 步")
+        first = self.steps[0]
+        last = self.steps[-1]
+        if first.subject != self.root or first.subject_label != self.root_label:
+            raise ValueError("路径起始节点与 root 不一致")
+        if last.object != self.target or last.object_label != self.target_label:
+            raise ValueError("路径终止节点与 target 不一致")
+        for current, following in zip(self.steps, self.steps[1:]):
+            if (
+                current.object != following.subject
+                or current.object_label != following.subject_label
+            ):
+                raise ValueError("路径步骤节点不连续")
+
+        if len(self.steps) == 2:
+            self.first_relationship = first.relationship
+            self.intermediate = first.object
+            self.intermediate_label = first.object_label
+            self.second_relationship = last.relationship
+        else:
+            self.first_relationship = None
+            self.intermediate = None
+            self.intermediate_label = None
+            self.second_relationship = None
+        return self
 
 # 工作流阶段耗时
 class StageTiming(StrictModel):

@@ -21,7 +21,7 @@ SUGGESTED_QUESTIONS = (
 )
 
 PLAN_LABELS = {
-    "controlled_multi_hop": "受控两跳",
+    "controlled_multi_hop": "受控多跳",
     "controlled_attribute": "图谱属性",
     "controlled_aggregate": "受控统计",
     "controlled_multi_condition_list": "多条件列表",
@@ -1462,24 +1462,42 @@ def _render_aggregate_evidence(items: Sequence[dict]) -> None:
     )
 
 
-def _render_path_evidence(items: Sequence[dict]) -> None:
-    cards = []
-    for item in items:
-        cards.append(
-            '<div class="kg-path-card">'
-            '<div class="kg-path-chain">'
-            f'<span class="kg-path-node">{html.escape(str(item.get("root", "")))}'
-            f' · {_entity_label(item.get("root_label", ""))}</span>'
-            f'<span class="kg-path-relation">{html.escape(_relation_label(item.get("first_relationship")))} →</span>'
-            f'<span class="kg-path-node">{html.escape(str(item.get("intermediate", "")))}'
-            f' · {_entity_label(item.get("intermediate_label", ""))}</span>'
-            f'<span class="kg-path-relation">{html.escape(_relation_label(item.get("second_relationship")))} →</span>'
-            f'<span class="kg-path-node">{html.escape(str(item.get("target", "")))}'
-            f' · {_entity_label(item.get("target_label", ""))}</span>'
-            "</div>"
-            f'<div class="kg-fact-source">来源 · {_source_text(item.get("source"))}</div>'
-            "</div>"
+def _path_evidence_card_html(item: dict) -> str:
+    steps = item.get("steps") or [
+        {
+            "relationship": item.get("first_relationship"),
+            "object": item.get("intermediate"),
+            "object_label": item.get("intermediate_label"),
+        },
+        {
+            "relationship": item.get("second_relationship"),
+            "object": item.get("target"),
+            "object_label": item.get("target_label"),
+        },
+    ]
+    chain_html = (
+        f'<span class="kg-path-node">{html.escape(str(item.get("root", "")))}'
+        f' · {_entity_label(item.get("root_label", ""))}</span>'
+    )
+    for step in steps:
+        chain_html += (
+            f'<span class="kg-path-relation">'
+            f'{html.escape(_relation_label(step.get("relationship")))} →</span>'
+            f'<span class="kg-path-node">{html.escape(str(step.get("object", "")))}'
+            f' · {_entity_label(step.get("object_label", ""))}</span>'
         )
+    return (
+        '<div class="kg-path-card">'
+        '<div class="kg-path-chain">'
+        f"{chain_html}"
+        "</div>"
+        f'<div class="kg-fact-source">来源 · {_source_text(item.get("source"))}</div>'
+        "</div>"
+    )
+
+
+def _render_path_evidence(items: Sequence[dict]) -> None:
+    cards = [_path_evidence_card_html(item) for item in items]
     st.markdown(
         '<div class="kg-evidence-list">' + "".join(cards) + "</div>",
         unsafe_allow_html=True,

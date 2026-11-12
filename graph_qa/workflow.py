@@ -40,6 +40,7 @@ from graph_qa.models import (
     IntentResult,
     MultiHopQueryPlan,
     PathEvidence,
+    PathStepEvidence,
     QueryInfo,
     RetrievalPlanningInput,
     StageTiming,
@@ -285,27 +286,29 @@ def _multi_hop_answer(
     plan: MultiHopQueryPlan,
     paths: Sequence[PathEvidence],
 ) -> str:
-    grouped: Dict[str, List[str]] = {}
-    root_by_intermediate: Dict[str, str] = {}
-    second_relationship = plan.steps[1].relationship
-    for item in paths:
-        values = grouped.setdefault(item.intermediate, [])
-        if item.target not in values:
-            values.append(item.target)
-        root_by_intermediate[item.intermediate] = item.root
     lines = [f"根据当前图谱，{plan.description}如下："]
-    for intermediate, targets in grouped.items():
-        root = root_by_intermediate[intermediate]
-        prefix = f"{root} → " if root != intermediate else ""
-        if second_relationship == "HAS_EFFECT":
-            value = "、".join(targets)
-        elif second_relationship == "TREATS_DISEASE":
-            value = "可治疗" + "、".join(targets)
-        elif second_relationship == "ALLEVIATES_SYMPTOM":
-            value = "可缓解" + "、".join(targets)
-        else:
-            value = "、".join(targets)
-        lines.append(f"- {prefix}{intermediate}：{value}")
+    seen = set()
+    relationship_text = {
+        "HAS_EFFECT": "相关功效：",
+        "TREATS_DISEASE": "可治疗：",
+        "ALLEVIATES_SYMPTOM": "可缓解：",
+        "HAS_SYMPTOM": "可能出现的症状：",
+        "FROM_SOURCE": "相关来源：",
+        "HAS_INGREDIENT": "包含：",
+    }
+    for item in paths:
+        node_names = [item.root, *(step.object for step in item.steps)]
+        prefix = " → ".join(node_names[:-1])
+        last_relationship = item.steps[-1].relationship
+        value = relationship_text.get(
+            last_relationship,
+            "关联到：",
+        )
+        line = f"- {prefix}：{value}{item.target}"
+        if line in seen:
+            continue
+        seen.add(line)
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -432,6 +435,7 @@ class GraphQAEngine:
         entity_index: Optional[EntityIndex] = None,
         max_attempts: int = 3,
         entity_limit: int = 10,
+        dynamic_multi_hop_enabled: bool = True,
     ):
         if max_attempts < 1:
             raise ValueError("max_attempts 必须大于等于 1")
@@ -451,6 +455,7 @@ class GraphQAEngine:
             reasoner=reasoner,
             schema=schema,
             max_results=self.guard.max_results,
+            dynamic_multi_hop_enabled=dynamic_multi_hop_enabled,
         )
         self.graph = self._build_graph()
 
@@ -838,21 +843,21 @@ class GraphQAEngine:
         multi_hop_plan = state.get("multi_hop_plan")
         if multi_hop_plan is not None:
             try:
-                if len(multi_hop_plan.steps) != 2:
+                if not 2 <= len(multi_hop_plan.steps) <= 3:
                     raise ValueError("多跳步骤数量错误")
-                first, second = multi_hop_plan.steps
-                if first.object_label != second.subject_label:
-                    raise ValueError("多跳节点链不连续")
-                self.schema.assert_pattern(
-                    first.subject_label,
-                    first.relationship,
-                    first.object_label,
-                )
-                self.schema.assert_pattern(
-                    second.subject_label,
-                    second.relationship,
-                    second.object_label,
-                )
+                first = multi_hop_plan.steps[0]
+                for previous, current in zip(
+                    multi_hop_plan.steps,
+                    multi_hop_plan.steps[1:],
+                ):
+                    if previous.object_label != current.subject_label:
+                        raise ValueError("多跳节点链不连续")
+                for step in multi_hop_plan.steps:
+                    self.schema.assert_pattern(
+                        step.subject_label,
+                        step.relationship,
+                        step.object_label,
+                    )
                 if any(
                     entity.label != first.subject_label
                     for entity in multi_hop_plan.used_entities
@@ -1032,27 +1037,41 @@ class GraphQAEngine:
                     "图谱查询失败，请稍后重试。",
                     "execute_cypher",
                 )
-            first, second = multi_hop_plan.steps
             paths: List[PathEvidence] = []
             seen_paths = set()
             for row in result.rows:
                 root = row.get("root")
                 root_label = row.get("root_label")
-                intermediate = row.get("intermediate")
-                intermediate_label = row.get("intermediate_label")
                 target = row.get("target")
                 target_label = row.get("target_label")
-                first_relationship = row.get("first_relationship")
-                second_relationship = row.get("second_relationship")
+                relationship_types = row.get("relationship_types")
+                node_names = row.get("node_names")
+                node_labels = row.get("node_labels")
                 if (
                     not isinstance(root, str)
-                    or not isinstance(intermediate, str)
                     or not isinstance(target, str)
-                    or root_label != first.subject_label
-                    or intermediate_label != first.object_label
-                    or target_label != second.object_label
-                    or first_relationship != first.relationship
-                    or second_relationship != second.relationship
+                    or not isinstance(relationship_types, list)
+                    or not isinstance(node_names, list)
+                    or not isinstance(node_labels, list)
+                    or len(relationship_types) != len(multi_hop_plan.steps)
+                    or len(node_names) != len(multi_hop_plan.steps)
+                    or len(node_labels) != len(multi_hop_plan.steps)
+                    or root_label != multi_hop_plan.steps[0].subject_label
+                    or target_label
+                    != multi_hop_plan.steps[-1].object_label
+                ):
+                    continue
+                expected_relationships = [
+                    step.relationship for step in multi_hop_plan.steps
+                ]
+                expected_node_labels = [
+                    step.object_label for step in multi_hop_plan.steps
+                ]
+                if (
+                    relationship_types != expected_relationships
+                    or node_labels != expected_node_labels
+                    or any(not isinstance(name, str) for name in node_names)
+                    or target != node_names[-1]
                 ):
                     continue
                 sources = row.get("sources")
@@ -1063,12 +1082,30 @@ class GraphQAEngine:
                         for item in sources
                         if isinstance(item, str) and item
                     ) or None
+                path_steps = []
+                subject = root
+                subject_label = root_label
+                for step, object_name, object_label in zip(
+                    multi_hop_plan.steps,
+                    node_names,
+                    node_labels,
+                    strict=True,
+                ):
+                    path_steps.append(
+                        PathStepEvidence(
+                            subject=subject,
+                            subject_label=subject_label,
+                            relationship=step.relationship,
+                            object=object_name,
+                            object_label=object_label,
+                        )
+                    )
+                    subject = object_name
+                    subject_label = object_label
                 key = (
                     root,
-                    intermediate,
-                    target,
-                    first_relationship,
-                    second_relationship,
+                    tuple(node_names),
+                    tuple(relationship_types),
                     source,
                 )
                 if key in seen_paths:
@@ -1078,12 +1115,9 @@ class GraphQAEngine:
                     PathEvidence(
                         root=root,
                         root_label=root_label,
-                        first_relationship=first_relationship,
-                        intermediate=intermediate,
-                        intermediate_label=intermediate_label,
-                        second_relationship=second_relationship,
                         target=target,
                         target_label=target_label,
+                        steps=path_steps,
                         source=source,
                     )
                 )

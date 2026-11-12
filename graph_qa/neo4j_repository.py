@@ -522,29 +522,26 @@ LIMIT {self.max_results}
         self,
         plan: MultiHopQueryPlan,
     ) -> QueryResult:
-        """执行受控的两跳查询并返回完整路径记录。"""
-        if len(plan.steps) != 2:
+        """执行受控的 2～3 跳查询并返回完整路径记录。"""
+        if not 2 <= len(plan.steps) <= 3:
             raise RepositoryError(
                 ErrorCode.CYPHER_REJECTED,
-                "多跳查询必须包含两个步骤",
+                "多跳查询必须包含 2 到 3 个步骤",
             )
-        first, second = plan.steps
-        if first.object_label != second.subject_label:
-            raise RepositoryError(
-                ErrorCode.CYPHER_REJECTED,
-                "多跳查询节点链不连续",
-            )
+        first = plan.steps[0]
+        for previous, current in zip(plan.steps, plan.steps[1:]):
+            if previous.object_label != current.subject_label:
+                raise RepositoryError(
+                    ErrorCode.CYPHER_REJECTED,
+                    "多跳查询节点链不连续",
+                )
         try:
-            self.schema.assert_pattern(
-                first.subject_label,
-                first.relationship,
-                first.object_label,
-            )
-            self.schema.assert_pattern(
-                second.subject_label,
-                second.relationship,
-                second.object_label,
-            )
+            for step in plan.steps:
+                self.schema.assert_pattern(
+                    step.subject_label,
+                    step.relationship,
+                    step.object_label,
+                )
         except Exception as exc:
             raise RepositoryError(
                 ErrorCode.CYPHER_REJECTED,
@@ -570,36 +567,63 @@ LIMIT {self.max_results}
             if can_load_source
             else ""
         )
+        relationship_variables = [
+            "first",
+            "second",
+            "third",
+        ][: len(plan.steps)]
+        intermediate_variables = [
+            f"middle_{index}"
+            for index in range(1, len(plan.steps))
+        ]
+        node_variables = ["root", *intermediate_variables, "target"]
+        path_parts = [f"({node_variables[0]}:{first.subject_label})"]
+        for index, step in enumerate(plan.steps):
+            path_parts.append(
+                f"-[{relationship_variables[index]}:{step.relationship}]->"
+                f"({node_variables[index + 1]}:{step.object_label})"
+            )
+        path_pattern = "".join(path_parts)
+        relationships_return = ", ".join(
+            f"type({variable})"
+            for variable in relationship_variables
+        )
+        nodes_return = ", ".join(
+            f"{variable}.name"
+            for variable in node_variables[1:]
+        )
+        node_labels_return = ", ".join(
+            f"labels({variable})[0]"
+            for variable in node_variables[1:]
+        )
+        with_variables = ", ".join(
+            [*node_variables, *relationship_variables]
+        )
         source_return = (
             "[name IN source_names WHERE name IS NOT NULL]"
             if can_load_source
             else "[]"
         )
         with_clause = (
-            "WITH root, first, middle, second, target, "
+            f"WITH {with_variables}, "
             "collect(DISTINCT source_node.name) AS source_names"
             if can_load_source
-            else "WITH root, first, middle, second, target"
+            else f"WITH {with_variables}"
         )
         query = f"""
-MATCH (root:{first.subject_label})
-      -[first:{first.relationship}]->
-      (middle:{first.object_label})
-      -[second:{second.relationship}]->
-      (target:{second.object_label})
+MATCH {path_pattern}
 WHERE root.name IN $entity_names
 {source_match}
 {with_clause}
 RETURN DISTINCT root.name AS root,
        labels(root)[0] AS root_label,
-       type(first) AS first_relationship,
-       middle.name AS intermediate,
-       labels(middle)[0] AS intermediate_label,
-       type(second) AS second_relationship,
+       [{relationships_return}] AS relationship_types,
+       [{nodes_return}] AS node_names,
+       [{node_labels_return}] AS node_labels,
        target.name AS target,
        labels(target)[0] AS target_label,
        {source_return} AS sources
-ORDER BY root, intermediate, target
+ORDER BY root, target
 LIMIT {self.max_results}
 """.strip()
         parameters = {
