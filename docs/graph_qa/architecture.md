@@ -382,7 +382,7 @@ flowchart LR
 - 属性型问题不再被强制构造成不存在的图关系。
 - 明确的单跳或多条件交集计数问题使用受控 Schema 模板，不允许模型自由生成聚合。
 - “同时满足多个实体条件”的列表问题使用多个 `EXISTS` 固定模板，返回结果节点、命中关系和来源。
-- 两跳查询只允许 Schema 中存在且明确列入白名单的路径；每一跳都必须连续，并返回完整 `PathEvidence`。
+- 多跳查询只允许 Schema 中存在、连续、唯一且无循环的 2～3 步路径；每一跳都必须通过校验，并返回完整 `PathEvidence`。
 - 查询规划优先使用经过测试的模板，Text2Cypher 只作为受限回退。
 - `RetrievalAgent` 使用独立 `RetrievalPlanningInput`/`RetrievalPlanningResult` 契约，输出最多一个现有计划对象；其执行顺序固定为两跳、属性、聚合、多条件列表、关系模板和 Schema 约束回退。
 - 查询计划类型通过 API `query.plan_kind` 和 SSE `plan_cypher.plan_kind` 公开，Streamlit 只展示安全中文策略名称，不展示模型推理或未校验 Cypher。

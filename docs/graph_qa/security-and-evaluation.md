@@ -364,7 +364,7 @@
 
 ### 9.5 数据集扩充要求
 
-- 产品固定集已达到 200 条；后续重点是独立人工事实抽检。
+- 产品固定集已达到 220 条；后续重点是独立人工事实抽检。
 - 人工抽检使用 `graph_qa.human_fact_audit` 从实际评测结果按类别分层抽样，默认 50 条、固定随机种子。待审核文件只展示问题、回答、实体、证据和来源，不展示自动期望结果，避免审核者被生成标签锚定。
 - 审核者填写 `fact_verdict`、`unsupported_claims` 和 `source_disclosure_correct` 后，工具按事实正确率不低于 95%、无依据断言为 0、来源披露率 100% 进行汇总。
 - 现有 120 条作为关系与安全回归集保留。
@@ -376,12 +376,12 @@
 
 ```powershell
 uv run python -m graph_qa.human_fact_audit build `
-  --evaluation output/graph_qa/product-quality-200-final.json `
-  --output output/graph_qa/human-fact-audit-50.jsonl
+  --evaluation output/graph_qa/product-quality-220-dynamic-multi-hop-final-2026-11-12.json `
+  --output evaluation/human_fact_review-50-2026-11-13.jsonl
 
 uv run python -m graph_qa.human_fact_audit summarize `
-  --reviews output/graph_qa/human-fact-audit-50.jsonl `
-  --output output/graph_qa/human-fact-audit-summary.json
+  --reviews evaluation/human_fact_review-50-2026-11-13.jsonl `
+  --output output/graph_qa/human-fact-audit-summary-2026-11-13.json
 ```
 - 图谱或元数据更新后，重新核对受影响的期望值。
 
