@@ -486,13 +486,16 @@ uv run python -m graph_qa.latency_evaluate `
 [动态多跳开发方案与验收](docs/graph_qa/动态多跳开发方案与验收-2026-11-12.md)。
 50 条人工审核包、审核门禁和基础 CI 记录见
 [质量验收与基础 CI 实施记录](docs/graph_qa/质量验收与CI实施记录-2026-11-13.md)。
+P5.1 检索 Agent 独立子图方案见
+[检索 Agent 独立子图方案与验收](docs/graph_qa/检索Agent独立子图方案与验收-2026-11-15.md)。
 
 下一阶段顺序：
 
-1. 使用已实现工具完成 50 条独立领域人工事实审核。
-2. 将真实 Redis/API/Neo4j 集成测试纳入可重复 CI。
-3. 完成上述质量门禁后进入独立 Agent 拓扑或动态调度。
-4. 性能优化、内部试用、多用户认证、监控、多 worker 和公网部署继续延后。
+1. 确认最新 `main/dev` 的 GitHub Actions 基础测试通过。
+2. CI 通过后开始 P5.1：`RetrievalAgent` 独立子图 v1。
+3. 使用已实现工具并行完成 50 条独立领域人工事实审核。
+4. 将真实 Redis/API/Neo4j 集成测试纳入可重复 CI。
+5. 性能优化、内部试用、多用户认证、监控、多 worker 和公网部署继续延后。
 
 完整规划见
 [专业中医图谱问答产品质量路线图](docs/graph_qa/product-quality-roadmap.md)。
