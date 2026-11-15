@@ -1,6 +1,6 @@
 # 知识图谱问答交接说明
 
-> 代码基线：`548702f`
+> 代码基线：`1234a12`
 >
 > 交接日期：2026-11-15
 >
@@ -250,7 +250,7 @@ uv run python -m pytest tests/ -v
 - P5.1 检索 Agent 独立子图提交：`548702f`。
 - 全量 pytest：`275 passed, 5 skipped`。
 - 产品固定集：220/220 outcome 通过；未知实体误召回 0%，无依据与无来源披露 100%。
-- 真实 Redis 双实例、Neo4j/模型和 API 跨实例会话集成本轮均通过。
+- 真实 Redis 双实例和 Neo4j 本轮通过；API 跨实例多轮测试受外部模型 `MODEL_UNAVAILABLE` 阻塞，未通过。
 - 最新完整记录：[trustworthy-answer-v1.1-validation-2026-11-09.md](trustworthy-answer-v1.1-validation-2026-11-09.md)。
 - semantic 边界最新记录：[语义召回边界验证记录](语义召回边界验证记录-2026-11-09.md)。
 - 阶段耗时最新记录：[阶段耗时观测与优化记录](阶段耗时观测与优化记录-2026-11-11.md)。
@@ -330,7 +330,7 @@ uv run python -m pytest tests/ -v
 - 前端不会保留服务端未成功创建的 `session_id`。
 - 第 6 轮裁剪、TTL、主动清空和跨会话隔离。
 
-当前固定集为 20 组、62 轮，最近全量 outcome 和实体匹配均为 100%。真实 Redis/API 跨实例测试已在本轮通过。
+当前固定集为 20 组、62 轮，最近全量 outcome 和实体匹配均为 100%。真实 Redis 跨实例测试已在本轮通过；API 跨实例多轮测试仍待外部模型恢复后补跑。
 
 ### 12.3 产品验收重点
 
@@ -366,3 +366,57 @@ product-quality-roadmap.md，再检查 git status。
 内部试用和公开上线工程化后续再做。
 开发前按 AGENTS.md 给出方案并等待确认。
 ```
+
+## 14. 2026-11-15 交接快照
+
+### 14.1 分支状态
+
+| 分支 | 提交 | 远程状态 |
+| --- | --- | --- |
+| `main` | `2000720` | `origin/main` 已同步 |
+| `dev` | `2000720` | `origin/dev` 已同步 |
+| `codex/p5-retrieval-subgraph` | `1234a12` | `origin/codex/p5-retrieval-subgraph` 已同步 |
+
+所有本地分支均未落后于各自上游。P5.1 尚未合并到 `dev/main`。
+
+### 14.2 P5.1 当前成果
+
+- 父图由 17 个节点调整为 14 个节点。
+- 检索入口调用包含 4 个阶段的独立检索子图。
+- `plan → validate/execute → observe → replan` 最大循环保持三次。
+- 原公开阶段名称、SSE 字段和 API 契约保持不变。
+- Guard、`EXPLAIN`、只读仓储和回答审核边界未改变。
+
+提交：
+
+```text
+ca190ff docs: 规划检索Agent独立子图
+548702f refactor: 拆分检索Agent独立子图
+1234a12 docs: 记录检索Agent独立子图验收
+```
+
+### 14.3 当前验证状态
+
+- 默认全量 pytest：`275 passed, 5 skipped`。
+- 真实 Redis 限流、并发和会话测试：`3 passed`。
+- 真实 Neo4j 集成测试：通过。
+- 浏览器属性查询：证据 `1/1`，审核通过。
+- 浏览器关系/Schema 查询：证据 `20/20`，审核通过。
+- 浏览器截图：`output/playwright/检索子图属性与关系-2026-11-15.png`。
+
+未完成：
+
+- API 跨实例多轮测试受外部模型 `MODEL_UNAVAILABLE` 阻塞。
+- 120 条黄金集、220 条产品集、62 轮多轮集和动态多跳固定集未在 P5.1 提交上重跑。
+- 50 条独立领域人工事实审核仍为 `0/50`。
+
+### 14.4 续作顺序
+
+1. 恢复外部模型服务。
+2. 重跑 API 跨实例、120 条、220 条、62 轮和动态多跳固定集。
+3. 确认 GitHub Actions 和真实依赖回归全部通过。
+4. 将 `codex/p5-retrieval-subgraph` 合并到 `dev`，再验证并合入 `main`。
+5. 合并后删除 P5.1 功能分支。
+6. 独立领域审核者完成 50 条人工事实复核。
+
+外部模型恢复前，不把 P5.1 标记为最终验收完成，也不直接更新 `dev/main`。
