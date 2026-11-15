@@ -462,7 +462,7 @@ uv run python -m graph_qa.latency_evaluate `
 - 图谱属性事实、属性/唯一关系模板和结构化答案支持校验。
 - 单跳关系计数和图谱聚合结果。
 - 20 组、62 轮多轮上下文固定集。
-- 全量测试 271 passed、5 skipped；真实 120 条评测 outcome 通过 119 条。
+- 全量测试 275 passed、5 skipped；真实 120 条评测 outcome 通过 119 条。
 - 纯召回 Recall@3 为 100%；完整工作流实体 Recall@3 为 97.78%。
 - 当前 220 条产品固定集 outcome 通过率 100%，接受门禁通过。
 - 未知实体误召回率 0%，无依据诚实率和无来源披露率均为 100%。
@@ -486,16 +486,17 @@ uv run python -m graph_qa.latency_evaluate `
 [动态多跳开发方案与验收](docs/graph_qa/动态多跳开发方案与验收-2026-11-12.md)。
 50 条人工审核包、审核门禁和基础 CI 记录见
 [质量验收与基础 CI 实施记录](docs/graph_qa/质量验收与CI实施记录-2026-11-13.md)。
-P5.1 检索 Agent 独立子图方案见
-[检索 Agent 独立子图方案与验收](docs/graph_qa/检索Agent独立子图方案与验收-2026-11-15.md)。
+P5.1 检索 Agent 独立子图已实现，方案见
+[检索 Agent 独立子图方案与验收](docs/graph_qa/检索Agent独立子图方案与验收-2026-11-15.md)；
+实施结果见
+[检索 Agent 独立子图验收记录](docs/graph_qa/检索Agent独立子图验收记录-2026-11-15.md)。
 
 下一阶段顺序：
 
-1. 确认最新 `main/dev` 的 GitHub Actions 基础测试通过。
-2. CI 通过后开始 P5.1：`RetrievalAgent` 独立子图 v1。
-3. 使用已实现工具并行完成 50 条独立领域人工事实审核。
-4. 将真实 Redis/API/Neo4j 集成测试纳入可重复 CI。
-5. 性能优化、内部试用、多用户认证、监控、多 worker 和公网部署继续延后。
+1. 恢复外部模型服务并补跑 P5.1 固定集和 API 跨实例回归。
+2. 使用已实现工具并行完成 50 条独立领域人工事实审核。
+3. 将真实 Redis/API/Neo4j 集成测试纳入可重复 CI。
+4. 性能优化、内部试用、多用户认证、监控、多 worker 和公网部署继续延后。
 
 完整规划见
 [专业中医图谱问答产品质量路线图](docs/graph_qa/product-quality-roadmap.md)。

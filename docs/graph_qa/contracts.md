@@ -268,6 +268,8 @@ RetrievalLoopDecision
 
 `replan` 只能回到既有受控规划目录。执行错误直接结束，校验失败或属性空回退在预算内重新规划，有可验证上下文时进入回答，无上下文时进入无依据，预算耗尽进入安全失败。循环轨迹不包含模型隐藏推理。
 
+P5.1 将该循环实现为独立 LangGraph 检索子图。父图只调用检索入口，不新增用户可见阶段；`plan_cypher`、`validate_cypher`、`execute_cypher` 和 `retrieve_observe` 仍按原名称与顺序输出。Guard、`EXPLAIN`、只读仓储和状态预算仍由父工作流注入，子图不得持有数据库连接或放宽查询边界。
+
 ### 4.5 Cypher 计划
 
 ```text

@@ -135,7 +135,7 @@ flowchart TB
 | `answer` | `answer_from_graph`、`direct_answer` | 受控关系使用确定性中文回答；复杂图谱回答和直接回答调用模型，失败时使用证据化降级 |
 | `evidence_audit` | `verify_answer`、`clarify`、`no_evidence`、`safe_fail`、`finish` | 真实确定性 Agent；核对全部本轮证据并使用证据化回退，其余阶段仍由工作流收口 |
 
-该注册表提供重复 Agent、重复阶段和未知阶段的明确错误。`RetrievalAgent` 接收问题、已链接实体、Schema、计划尝试状态和受限模型回退生成器，并通过 `retrieve_observe` 消费工具结果；它不持有 Cypher Guard 或仓储，不能自行执行查询。SSE `stage` 事件携带阶段对应的 `agent`，`plan_cypher` 阶段另外携带稳定的 `plan_kind` 和中文 `plan_label`，`retrieve_observe` 公开当前步数、下一步决策和稳定原因码；审核完成后另有 `audit` 事件。当前 LangGraph 是 17 个固定节点，已经具备主图内的受控 Agent 循环，但不是独立 Agent 子图或动态调度系统。
+该注册表提供重复 Agent、重复阶段和未知阶段的明确错误。`RetrievalAgent` 接收问题、已链接实体、Schema、计划尝试状态和受限模型回退生成器，并通过 `retrieve_observe` 消费工具结果；它不持有 Cypher Guard 或仓储，不能自行执行查询。SSE `stage` 事件携带阶段对应的 `agent`，`plan_cypher` 阶段另外携带稳定的 `plan_kind` 和中文 `plan_label`，`retrieve_observe` 公开当前步数、下一步决策和稳定原因码；审核完成后另有 `audit` 事件。当前父图包含 14 个节点，其中检索入口调用包含 4 个节点的独立检索子图；动态调度和完全自治协作仍未实现。
 
 ### 4.3 路由
 
@@ -151,12 +151,10 @@ flowchart TD
     Intent -->|是| Extract[抽取实体候选]
     Extract --> Link[精确 / fuzzy / FAISS 混合链接]
     Link -->|无匹配| Clarify[请求补充具体实体]
-    Link -->|有匹配| Plan[选择属性、聚合、多条件、多跳、关系模板或生成 Cypher]
-    Plan -->|受控模板或白名单多跳| Validate[安全与结构校验]
-    Plan -->|复杂问题| Text2Cypher[Schema 约束 Text2Cypher]
-    Text2Cypher --> Validate
+    Link -->|有匹配| Plan[检索子图：选择受控查询计划]
+    Plan --> Validate[校验安全与结构]
     Validate -->|通过| Execute[只读执行]
-    Validate --> Observe[Agent 观察结果]
+    Validate --> Observe[观察结果与决策]
     Execute --> Observe
     Observe -->|重规划且未超预算| Plan
     Observe -->|耗尽预算| SafeFail[安全失败]
@@ -170,7 +168,7 @@ flowchart TD
     Verify --> End
 ```
 
-“重试上限 3”表示 Agent 最多执行三次计划/工具观察循环。计数由 `retrieval_steps` 固定状态字段控制；每次观察产生稳定 `next_action` 和 `reason_code`，不能依赖递归自然结束。
+“重试上限 3”表示检索子图最多执行三次计划/工具观察循环。计数由 `retrieval_steps` 固定状态字段控制；每次观察产生稳定 `next_action` 和 `reason_code`，不能依赖递归自然结束。
 
 ## 5. 意图识别
 
@@ -385,6 +383,7 @@ flowchart LR
 - 多跳查询只允许 Schema 中存在、连续、唯一且无循环的 2～3 步路径；每一跳都必须通过校验，并返回完整 `PathEvidence`。
 - 查询规划优先使用经过测试的模板，Text2Cypher 只作为受限回退。
 - `RetrievalAgent` 使用独立 `RetrievalPlanningInput`/`RetrievalPlanningResult` 契约，输出最多一个现有计划对象；其执行顺序固定为两跳、属性、聚合、多条件列表、关系模板和 Schema 约束回退。
+- 规划、校验、执行和观察已经收敛为独立 LangGraph 检索子图；父图只调用子图入口，SSE 仍公开原有四个内部阶段。
 - 查询计划类型通过 API `query.plan_kind` 和 SSE `plan_cypher.plan_kind` 公开，Streamlit 只展示安全中文策略名称，不展示模型推理或未校验 Cypher。
 - 最终回答生成后增加事实与引用校验。
 - 多轮上下文支持指代消解、实体继承、话题切换、用户纠正和失败轮次隔离。
@@ -404,7 +403,7 @@ flowchart LR
 - 任意深度、任意关系组合或由模型自由生成的复杂多跳查询。
 - 更大规模、独立真实问题的属性与多轮评测集。
 - 人工或规则化的答案关键事实准确率评估。
-- 检索规划 Agent 的独立子图、动态调度和多 Agent 自治协作。
+- 检索规划 Agent 之后的动态调度和多 Agent 自治协作。
 - 回答审核的语义等价判断和大规模人工事实抽检。
 
 实现必须保持以下不变量：

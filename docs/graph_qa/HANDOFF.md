@@ -1,10 +1,10 @@
 # 知识图谱问答交接说明
 
-> 代码基线：`2000720`
+> 代码基线：`548702f`
 >
 > 交接日期：2026-11-15
 >
-> 当前分支：`dev`
+> 当前分支：`codex/p5-retrieval-subgraph`
 
 本文用于新对话快速恢复上下文。开始开发前仍须完整阅读 `AGENTS.md`、`docs/graph_qa/README.md`、`architecture.md`、`contracts.md`、`security-and-evaluation.md` 和 `implementation-challenges.md`。
 
@@ -30,7 +30,7 @@
 | 查询覆盖扩展 | 已完成；多条件结果列表和 Schema 约束 2～3 步动态多跳 |
 | 质量验收与基础 CI | 基础 CI 已合入；分支已收敛；最新远程 CI 结果待确认；人工审核 0/50 |
 | Agent 基础层 | 已完成；角色注册、受控检索 Agent 闭环和证据审核 Agent 已接入 |
-| P5.1 检索 Agent 独立子图 | 方案已冻结；等待 CI 确认后编码 |
+| P5.1 检索 Agent 独立子图 | v1 已实现；自动化和浏览器关键链路通过；外部模型相关回归待补 |
 | M5 微调/部署增强 | 未开始 |
 
 明确不在当前范围：
@@ -42,7 +42,7 @@
 
 ## 3. 已实现架构
 
-LangGraph 当前包含 17 个节点，主要流程：
+父图当前包含 14 个节点，检索入口调用一个包含 4 个阶段的独立检索子图：
 
 ```text
 规范化
@@ -63,7 +63,7 @@ LangGraph 当前包含 17 个节点，主要流程：
 
 实体匹配顺序不能随意改成“语义优先”。真实测试中，“麻黄草”的 fuzzy 能正确命中麻黄，而 BGE 语义 Top-1 曾误排为天麻；当前策略是词形高置信匹配置信度高于语义召回。
 
-Agent 基础层目前是固定 LangGraph 拓扑上的职责注册，已具备受控单 Agent 闭环，但还不是独立 Agent 子图。P5.1 将把四个检索阶段收敛为独立子图：
+Agent 基础层已完成职责注册和受控单 Agent 闭环。P5.1 已将四个检索阶段收敛为独立子图：
 
 - `dialogue`：规范化与多轮改写，改写模型通过角色对象调用。
 - `intent`：实体预匹配与领域意图，意图模型通过角色对象调用。
@@ -181,7 +181,7 @@ uv run streamlit run graph_qa/streamlit_app.py
 
 ## 9. 验证基线
 
-- 当前全量 pytest：`271 passed, 5 skipped`。
+- 当前全量 pytest：`275 passed, 5 skipped`。
 - 真实 Neo4j + 模型集成：本地演示和历史验收已通过；本轮默认 pytest 中按配置跳过。
 - Redis 限流、并发、会话集成：历史验收已通过；本轮默认 pytest 中按配置跳过。
 - 真实跨实例 SSE 会话：历史验收已通过；本轮未重跑。
@@ -225,7 +225,7 @@ uv run python -m pytest tests/ -v
 - 没有可靠的 API 请求级硬取消，仍依赖模型和 Neo4j 组件超时。
 - 没有面向最终用户的多用户认证、监控和正式部署收尾。
 - 不实现内容生成第三路由。
-- `retrieval` 已具备主图内的 `plan → act → observe → replan` 闭环；独立 Agent 子图和动态调度仍未完成。
+- `retrieval` 已具备独立子图内的 `plan → validate/execute → observe → replan` 闭环；动态调度仍未完成。
 - 澄清后未解析代词已阻止进入 semantic 链接；最终 62 轮全量通过。
 
 ## 11. 当前实现与验证状态
@@ -247,7 +247,8 @@ uv run python -m pytest tests/ -v
 - 语义召回边界修复提交：`c9c430b`。
 - 动态多跳提交：`22fc2c5`。
 - 阶段耗时观测与关系回答优化提交：`369d4eb`。
-- 全量 pytest：`271 passed, 5 skipped`。
+- P5.1 检索 Agent 独立子图提交：`548702f`。
+- 全量 pytest：`275 passed, 5 skipped`。
 - 产品固定集：220/220 outcome 通过；未知实体误召回 0%，无依据与无来源披露 100%。
 - 真实 Redis 双实例、Neo4j/模型和 API 跨实例会话集成本轮均通过。
 - 最新完整记录：[trustworthy-answer-v1.1-validation-2026-11-09.md](trustworthy-answer-v1.1-validation-2026-11-09.md)。
@@ -256,6 +257,7 @@ uv run python -m pytest tests/ -v
 - 动态多跳最新记录：[动态多跳开发方案与验收](动态多跳开发方案与验收-2026-11-12.md)。
 - 质量验收与基础 CI 记录：[质量验收与 CI 实施记录](质量验收与CI实施记录-2026-11-13.md)。
 - P5.1 方案：[检索 Agent 独立子图方案与验收](检索Agent独立子图方案与验收-2026-11-15.md)。
+- P5.1 验收记录：[检索 Agent 独立子图验收记录](检索Agent独立子图验收记录-2026-11-15.md)。
 - 真实 120 条 outcome：`119/120`；实体 Recall@3：97.78%；grounded 证据覆盖率：100%。
 - 多轮全量：20 组、62 轮，outcome 和实体匹配均为 100%。
 - Cypher 通过率：100%；查询执行成功率：100%；`acceptance.passed=true`。
@@ -294,12 +296,11 @@ uv run python -m pytest tests/ -v
 
 当前优先级：
 
-1. 确认最新 `main/dev` 的 GitHub Actions 基础测试通过。
-2. CI 通过后立即开始 P5.1：`RetrievalAgent` 独立子图 v1。
-3. 独立领域审核者并行完成 50 条人工事实复核。
-4. 配置真实 Redis/API/Neo4j 集成的可重复运行环境。
-5. 保持动态多跳、semantic 边界、结构化回答审核、FastAPI、Streamlit、Redis、LangGraph、Neo4j、BGE + FAISS 和 Cypher Guard 不回归。
-6. 性能优化、内部试用、多用户认证、监控和多 worker 继续延后。
+1. 恢复外部模型服务并补跑 P5.1 固定集与 API 跨实例回归。
+2. 独立领域审核者并行完成 50 条人工事实复核。
+3. 配置真实 Redis/API/Neo4j 集成的可重复运行环境。
+4. 保持动态多跳、semantic 边界、结构化回答审核、FastAPI、Streamlit、Redis、LangGraph、Neo4j、BGE + FAISS 和 Cypher Guard 不回归。
+5. 性能优化、内部试用、多用户认证、监控和多 worker 继续延后。
 
 ### 12.1 当前质量基线
 
@@ -313,7 +314,7 @@ uv run python -m pytest tests/ -v
 - `Formula` 中约有 741 个主治、619 个功效字段和 604 个用法字段。
 - 来源关系覆盖：药材 412/2,359，方剂 720/1,020。
 
-属性事实、单跳聚合、多条件列表、Schema 约束 2～3 步动态多跳、检索规划 Agent、结构化证据审核、semantic 标签边界、阶段耗时观测和受控关系回答优化已完成。P5.1 方案已冻结，CI 确认后开始独立检索子图编码；人工事实复核并行推进。
+属性事实、单跳聚合、多条件列表、Schema 约束 2～3 步动态多跳、检索规划 Agent、结构化证据审核、semantic 标签边界、阶段耗时观测、受控关系回答优化和 P5.1 独立检索子图 v1 已完成实现；外部模型相关固定集回归待补，人工事实复核并行推进。
 
 ### 12.2 多轮上下文范围
 
@@ -361,7 +362,7 @@ product-quality-roadmap.md，再检查 git status。
 当前不实现内容生成，也不以多 worker 为运行目标。
 当前主线是查询契约已稳定的前提下推进 Agent 演进：
 保持属性和关系证据、多轮上下文、来源披露和固定集评测不回归，
-检索规划、证据审核 Agent、未知实体边界、多轮全量、动态多跳、阶段耗时观测和 220 条产品集已完成；当前等待基础 CI 最终确认，确认后从 `codex/p5-retrieval-subgraph` 开始独立检索子图；人工事实复核并行推进。
+检索规划、证据审核 Agent、未知实体边界、多轮全量、动态多跳、阶段耗时观测和 220 条产品集已完成；P5.1 独立检索子图 v1 已在 `codex/p5-retrieval-subgraph` 实现，默认测试、真实 Neo4j/Redis 和浏览器关键链路通过，外部模型相关回归待恢复后补跑；人工事实复核并行推进。
 内部试用和公开上线工程化后续再做。
 开发前按 AGENTS.md 给出方案并等待确认。
 ```
