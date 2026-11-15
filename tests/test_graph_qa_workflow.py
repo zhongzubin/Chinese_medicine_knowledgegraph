@@ -480,6 +480,52 @@ def test_workflow_returns_internal_stage_timings():
     assert all(item.elapsed_ms >= 0 for item in timings)
 
 
+def test_retrieval_runs_as_independent_subgraph_without_duplicate_stage():
+    reasoner = FakeReasoner(
+        intent=tcm_intent(),
+        candidates=[EntityCandidate(text="麻黄", suggested_label="Herb")],
+        plans=[make_plan()],
+    )
+    engine = GraphQAEngine(
+        reasoner=reasoner,
+        repository=FakeRepository(),
+        schema=make_schema(),
+        entity_index=make_index(),
+    )
+
+    events = list(engine.stream_answer("麻黄有什么功效？"))
+    public_stages = [
+        event.data["stage"]
+        for event in events
+        if event.event == "stage"
+    ]
+    main_nodes = set(engine.graph.get_graph().nodes)
+    retrieval_nodes = set(engine.retrieval_graph.get_graph().nodes)
+    _response, timings = engine.answer_with_timings("麻黄有什么功效？")
+
+    assert "retrieval_subgraph" in main_nodes
+    assert {
+        "plan_cypher",
+        "validate_cypher",
+        "execute_cypher",
+        "retrieve_observe",
+    }.isdisjoint(main_nodes)
+    assert {
+        "plan_cypher",
+        "validate_cypher",
+        "execute_cypher",
+        "retrieve_observe",
+    }.issubset(retrieval_nodes)
+    assert "retrieval_subgraph" not in public_stages
+    assert public_stages.count("plan_cypher") >= 1
+    assert public_stages.count("plan_cypher") == public_stages.count(
+        "retrieve_observe"
+    )
+    assert "retrieval_subgraph" not in {
+        timing.stage for timing in timings
+    }
+
+
 def test_attribute_question_uses_controlled_template_and_facts():
     reasoner = FakeReasoner(
         intent=tcm_intent(),

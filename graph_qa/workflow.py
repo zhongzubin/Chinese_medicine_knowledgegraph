@@ -23,6 +23,10 @@ from graph_qa.agents.retrieval import (
     has_tcm_query_cue,
     requested_attributes,
 )
+from graph_qa.agents.retrieval_subgraph import (
+    build_retrieval_subgraph,
+    retrieval_parent_update,
+)
 from graph_qa.cypher_guard import CypherGuard, CypherGuardError, detect_unsafe_question
 from graph_qa.entity_linker import EntityIndex, question_mentions_named_entity
 from graph_qa.llm import QAReasoner, ReasonerError
@@ -457,6 +461,13 @@ class GraphQAEngine:
             max_results=self.guard.max_results,
             dynamic_multi_hop_enabled=dynamic_multi_hop_enabled,
         )
+        self.retrieval_graph = build_retrieval_subgraph(
+            plan_cypher=self._plan_cypher,
+            validate_cypher=self._validate_cypher,
+            execute_cypher=self._execute_cypher,
+            retrieve_observe=self._retrieve_observe,
+            wrap_node=self._timed_node,
+        )
         self.graph = self._build_graph()
 
     @staticmethod
@@ -489,10 +500,6 @@ class GraphQAEngine:
             "classify_intent": self._classify_intent,
             "extract_entities": self._extract_entities,
             "link_entities": self._link_entities,
-            "plan_cypher": self._plan_cypher,
-            "validate_cypher": self._validate_cypher,
-            "execute_cypher": self._execute_cypher,
-            "retrieve_observe": self._retrieve_observe,
             "answer_from_graph": self._answer_from_graph,
             "verify_answer": self._verify_answer,
             "direct_answer": self._direct_answer,
@@ -503,6 +510,7 @@ class GraphQAEngine:
         }
         for stage, handler in nodes.items():
             builder.add_node(stage, self._timed_node(stage, handler))
+        builder.add_node("retrieval_subgraph", self._run_retrieval_subgraph)
 
         builder.add_edge(START, "normalize")
         builder.add_conditional_edges(
@@ -532,23 +540,15 @@ class GraphQAEngine:
         builder.add_conditional_edges(
             "link_entities",
             self._route_after_link,
-            {"plan_cypher": "plan_cypher", "clarify": "clarify"},
-        )
-        builder.add_edge("plan_cypher", "validate_cypher")
-        builder.add_conditional_edges(
-            "validate_cypher",
-            self._route_after_validate,
             {
-                "execute_cypher": "execute_cypher",
-                "retrieve_observe": "retrieve_observe",
+                "retrieval_subgraph": "retrieval_subgraph",
+                "clarify": "clarify",
             },
         )
-        builder.add_edge("execute_cypher", "retrieve_observe")
         builder.add_conditional_edges(
-            "retrieve_observe",
-            self._route_after_observe,
+            "retrieval_subgraph",
+            self._route_after_retrieval_subgraph,
             {
-                "plan_cypher": "plan_cypher",
                 "answer_from_graph": "answer_from_graph",
                 "no_evidence": "no_evidence",
                 "safe_fail": "safe_fail",
@@ -567,6 +567,118 @@ class GraphQAEngine:
             builder.add_edge(terminal_node, END)
         builder.add_edge("finish", END)
         return builder.compile()
+
+    def _events_for_node_update(
+        self,
+        node_name: str,
+        update: Mapping[str, Any],
+    ) -> Iterator[GraphQAStreamEvent]:
+        agent = self.agents.agent_for_stage(node_name)
+        stage_data: Dict[str, Any] = {
+            "stage": node_name,
+            "label": STAGE_LABELS.get(node_name, node_name),
+            "agent": agent.name,
+        }
+        plan_kind = update.get("retrieval_plan_kind")
+        if node_name == "plan_cypher" and plan_kind:
+            stage_data["plan_kind"] = plan_kind
+            stage_data["plan_label"] = RETRIEVAL_PLAN_LABELS.get(
+                plan_kind,
+                plan_kind,
+            )
+        if node_name == "retrieve_observe":
+            trace = (update.get("retrieval_trace") or [{}])[-1]
+            stage_data["step"] = trace.get("step", 0)
+            stage_data["decision"] = trace.get("next_action", "")
+            stage_data["reason_code"] = trace.get("reason_code", "")
+        yield GraphQAStreamEvent(event="stage", data=stage_data)
+
+        evidence = update.get("evidence", [])
+        if evidence:
+            yield GraphQAStreamEvent(
+                event="evidence",
+                data={
+                    "items": [
+                        item.model_dump(mode="json") for item in evidence
+                    ]
+                },
+            )
+        facts = update.get("facts", [])
+        if facts:
+            yield GraphQAStreamEvent(
+                event="facts",
+                data={
+                    "items": [
+                        item.model_dump(mode="json") for item in facts
+                    ]
+                },
+            )
+        aggregates = update.get("aggregates", [])
+        if aggregates:
+            yield GraphQAStreamEvent(
+                event="aggregates",
+                data={
+                    "items": [
+                        item.model_dump(mode="json") for item in aggregates
+                    ]
+                },
+            )
+        paths = update.get("paths", [])
+        if paths:
+            yield GraphQAStreamEvent(
+                event="paths",
+                data={
+                    "items": [
+                        item.model_dump(mode="json") for item in paths
+                    ]
+                },
+            )
+        verification = update.get("verification")
+        if verification is not None:
+            yield GraphQAStreamEvent(
+                event="audit",
+                data=verification.model_dump(mode="json"),
+            )
+        for warning in update.get("warnings", []):
+            yield GraphQAStreamEvent(
+                event="warning",
+                data={"message": warning},
+            )
+        if node_name == "verify_answer" and update.get("answer"):
+            yield GraphQAStreamEvent(
+                event="answer_delta",
+                data={"delta": update["answer"]},
+            )
+
+    def _run_retrieval_subgraph(
+        self,
+        state: AgentState,
+    ) -> Dict[str, Any]:
+        final_state: Mapping[str, Any] = state
+        for mode, payload in self.retrieval_graph.stream(
+            state,
+            stream_mode=["updates", "custom", "values"],
+        ):
+            if mode == "updates":
+                for node_name, update in payload.items():
+                    for event in self._events_for_node_update(
+                        node_name,
+                        update,
+                    ):
+                        _emit_stream_event(event.event, event.data)
+            elif mode == "custom":
+                if (
+                    isinstance(payload, dict)
+                    and isinstance(payload.get("event"), str)
+                    and isinstance(payload.get("data"), dict)
+                ):
+                    _emit_stream_event(
+                        payload["event"],
+                        payload["data"],
+                    )
+            elif mode == "values":
+                final_state = payload
+        return retrieval_parent_update(state, final_state)
 
     def _terminal_error(
         self,
@@ -1687,17 +1799,25 @@ class GraphQAEngine:
 
     @staticmethod
     def _route_after_link(state: AgentState) -> str:
-        return "plan_cypher" if state.get("linked_entities") else "clarify"
-
-    def _route_after_validate(self, state: AgentState) -> str:
-        if state.get("is_cypher_valid"):
-            return "execute_cypher"
-        return "retrieve_observe"
+        return (
+            "retrieval_subgraph"
+            if state.get("linked_entities")
+            else "clarify"
+        )
 
     @staticmethod
-    def _route_after_observe(state: AgentState) -> str:
+    def _route_after_retrieval_subgraph(state: AgentState) -> str:
         action = state.get("retrieval_next_action") or "finish"
-        return "plan_cypher" if action == "replan" else action
+        return (
+            action
+            if action in {
+                "answer_from_graph",
+                "no_evidence",
+                "safe_fail",
+                "finish",
+            }
+            else "finish"
+        )
 
     def _initial_state(
         self,
@@ -1883,101 +2003,12 @@ class GraphQAEngine:
             ):
                 if mode == "updates":
                     for node_name, update in payload.items():
-                        agent = self.agents.agent_for_stage(node_name)
-                        stage_data = {
-                            "stage": node_name,
-                            "label": STAGE_LABELS.get(
-                                node_name,
-                                node_name,
-                            ),
-                            "agent": agent.name,
-                        }
-                        plan_kind = update.get("retrieval_plan_kind")
-                        if node_name == "plan_cypher" and plan_kind:
-                            stage_data["plan_kind"] = plan_kind
-                            stage_data["plan_label"] = (
-                                RETRIEVAL_PLAN_LABELS.get(
-                                    plan_kind,
-                                    plan_kind,
-                                )
-                            )
-                        if node_name == "retrieve_observe":
-                            trace = (
-                                update.get("retrieval_trace") or [{}]
-                            )[-1]
-                            stage_data["step"] = trace.get("step", 0)
-                            stage_data["decision"] = trace.get(
-                                "next_action",
-                                "",
-                            )
-                            stage_data["reason_code"] = trace.get(
-                                "reason_code",
-                                "",
-                            )
-                        yield GraphQAStreamEvent(
-                            event="stage",
-                            data=stage_data,
+                        if node_name == "retrieval_subgraph":
+                            continue
+                        yield from self._events_for_node_update(
+                            node_name,
+                            update,
                         )
-                        evidence = update.get("evidence", [])
-                        if evidence:
-                            yield GraphQAStreamEvent(
-                                event="evidence",
-                                data={
-                                    "items": [
-                                        item.model_dump(mode="json")
-                                        for item in evidence
-                                    ]
-                                },
-                            )
-                        facts = update.get("facts", [])
-                        if facts:
-                            yield GraphQAStreamEvent(
-                                event="facts",
-                                data={
-                                    "items": [
-                                        item.model_dump(mode="json")
-                                        for item in facts
-                                    ]
-                                },
-                            )
-                        aggregates = update.get("aggregates", [])
-                        if aggregates:
-                            yield GraphQAStreamEvent(
-                                event="aggregates",
-                                data={
-                                    "items": [
-                                        item.model_dump(mode="json")
-                                        for item in aggregates
-                                    ]
-                                },
-                            )
-                        paths = update.get("paths", [])
-                        if paths:
-                            yield GraphQAStreamEvent(
-                                event="paths",
-                                data={
-                                    "items": [
-                                        item.model_dump(mode="json")
-                                        for item in paths
-                                    ]
-                                },
-                            )
-                        verification = update.get("verification")
-                        if verification is not None:
-                            yield GraphQAStreamEvent(
-                                event="audit",
-                                data=verification.model_dump(mode="json"),
-                            )
-                        for warning in update.get("warnings", []):
-                            yield GraphQAStreamEvent(
-                                event="warning",
-                                data={"message": warning},
-                            )
-                        if node_name == "verify_answer" and update.get("answer"):
-                            yield GraphQAStreamEvent(
-                                event="answer_delta",
-                                data={"delta": update["answer"]},
-                            )
                 elif mode == "custom":
                     if (
                         isinstance(payload, dict)
