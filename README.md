@@ -486,7 +486,7 @@ uv run python -m graph_qa.latency_evaluate `
 [动态多跳开发方案与验收](docs/graph_qa/动态多跳开发方案与验收-2026-11-12.md)。
 50 条人工审核包、审核门禁和基础 CI 记录见
 [质量验收与基础 CI 实施记录](docs/graph_qa/质量验收与CI实施记录-2026-11-13.md)。
-P5.1 检索 Agent 独立子图已实现，方案见
+P5.1 检索 Agent 独立子图已实现并合入三条分支，方案见
 [检索 Agent 独立子图方案与验收](docs/graph_qa/检索Agent独立子图方案与验收-2026-11-15.md)；
 实施结果见
 [检索 Agent 独立子图验收记录](docs/graph_qa/检索Agent独立子图验收记录-2026-11-15.md)。

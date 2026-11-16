@@ -1,10 +1,10 @@
 # 知识图谱问答交接说明
 
-> 代码基线：`1234a12`
+> 代码基线：`fec44e9`
 >
-> 交接日期：2026-11-15
+> 交接日期：2026-11-16
 >
-> 当前分支：`codex/p5-retrieval-subgraph`
+> 当前分支：`codex/p5-acceptance-closeout`
 
 本文用于新对话快速恢复上下文。开始开发前仍须完整阅读 `AGENTS.md`、`docs/graph_qa/README.md`、`architecture.md`、`contracts.md`、`security-and-evaluation.md` 和 `implementation-challenges.md`。
 
@@ -30,7 +30,7 @@
 | 查询覆盖扩展 | 已完成；多条件结果列表和 Schema 约束 2～3 步动态多跳 |
 | 质量验收与基础 CI | 基础 CI 已合入；分支已收敛；最新远程 CI 结果待确认；人工审核 0/50 |
 | Agent 基础层 | 已完成；角色注册、受控检索 Agent 闭环和证据审核 Agent 已接入 |
-| P5.1 检索 Agent 独立子图 | v1 已实现；自动化和浏览器关键链路通过；外部模型相关回归待补 |
+| P5.1 检索 Agent 独立子图 | v1 已实现并合入三条分支；自动化和浏览器关键链路通过；外部模型相关回归待补 |
 | M5 微调/部署增强 | 未开始 |
 
 明确不在当前范围：
@@ -248,6 +248,7 @@ uv run python -m pytest tests/ -v
 - 动态多跳提交：`22fc2c5`。
 - 阶段耗时观测与关系回答优化提交：`369d4eb`。
 - P5.1 检索 Agent 独立子图提交：`548702f`。
+- P5.1 合并到 `main/dev/功能分支`：`fec44e9`。
 - 全量 pytest：`275 passed, 5 skipped`。
 - 产品固定集：220/220 outcome 通过；未知实体误召回 0%，无依据与无来源披露 100%。
 - 真实 Redis 双实例和 Neo4j 本轮通过；API 跨实例多轮测试受外部模型 `MODEL_UNAVAILABLE` 阻塞，未通过。
@@ -373,11 +374,11 @@ product-quality-roadmap.md，再检查 git status。
 
 | 分支 | 提交 | 远程状态 |
 | --- | --- | --- |
-| `main` | `2000720` | `origin/main` 已同步 |
-| `dev` | `2000720` | `origin/dev` 已同步 |
-| `codex/p5-retrieval-subgraph` | `1234a12` | `origin/codex/p5-retrieval-subgraph` 已同步 |
+| `main` | `fec44e9` | `origin/main` 已同步 |
+| `dev` | `fec44e9` | `origin/dev` 已同步 |
+| `codex/p5-retrieval-subgraph` | `fec44e9` | `origin/codex/p5-retrieval-subgraph` 已同步 |
 
-所有本地分支均未落后于各自上游。P5.1 尚未合并到 `dev/main`。
+所有本地分支均未落后于各自上游。P5.1 已合并到 `main/dev`。
 
 ### 14.2 P5.1 当前成果
 
@@ -397,16 +398,16 @@ ca190ff docs: 规划检索Agent独立子图
 
 ### 14.3 当前验证状态
 
-- 默认全量 pytest：`275 passed, 5 skipped`。
-- 真实 Redis 限流、并发和会话测试：`3 passed`。
-- 真实 Neo4j 集成测试：通过。
+- 2026-11-16 默认全量 pytest：`275 passed, 5 skipped`。
+- 2026-11-16 真实 Redis 限流、并发和会话测试：`3 passed`。
+- 2026-11-16 真实 Neo4j 集成测试：通过。
 - 浏览器属性查询：证据 `1/1`，审核通过。
 - 浏览器关系/Schema 查询：证据 `20/20`，审核通过。
-- 浏览器截图：`output/playwright/检索子图属性与关系-2026-11-15.png`。
+- 浏览器截图：`output/playwright/P5.1验收-2026-11-16.png`。
 
 未完成：
 
-- API 跨实例多轮测试受外部模型 `MODEL_UNAVAILABLE` 阻塞。
+- 2026-11-16 API 跨实例多轮测试仍受外部模型 `MODEL_UNAVAILABLE` 阻塞。
 - 120 条黄金集、220 条产品集、62 轮多轮集和动态多跳固定集未在 P5.1 提交上重跑。
 - 50 条独立领域人工事实审核仍为 `0/50`。
 
@@ -415,8 +416,8 @@ ca190ff docs: 规划检索Agent独立子图
 1. 恢复外部模型服务。
 2. 重跑 API 跨实例、120 条、220 条、62 轮和动态多跳固定集。
 3. 确认 GitHub Actions 和真实依赖回归全部通过。
-4. 将 `codex/p5-retrieval-subgraph` 合并到 `dev`，再验证并合入 `main`。
-5. 合并后删除 P5.1 功能分支。
-6. 独立领域审核者完成 50 条人工事实复核。
+4. 全部回归通过后删除 `codex/p5-retrieval-subgraph`，只保留 `main/dev`。
+5. 独立领域审核者完成 50 条人工事实复核。
+6. 质量门禁通过后再启动 P5.2。
 
-外部模型恢复前，不把 P5.1 标记为最终验收完成，也不直接更新 `dev/main`。
+外部模型恢复前，不把 P5.1 标记为最终验收完成。代码当前已合并，但不能据此宣称固定集回归通过。
