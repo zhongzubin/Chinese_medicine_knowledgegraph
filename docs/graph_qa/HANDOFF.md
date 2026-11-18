@@ -1,10 +1,10 @@
 # 知识图谱问答交接说明
 
-> 代码基线：`fec44e9`
+> 代码基线：`2eac508`
 >
-> 交接日期：2026-11-16
+> 交接日期：2026-11-18
 >
-> 当前分支：`codex/p5-acceptance-closeout`
+> 当前分支：`main`
 
 本文用于新对话快速恢复上下文。开始开发前仍须完整阅读 `AGENTS.md`、`docs/graph_qa/README.md`、`architecture.md`、`contracts.md`、`security-and-evaluation.md` 和 `implementation-challenges.md`。
 
@@ -363,22 +363,22 @@ product-quality-roadmap.md，再检查 git status。
 当前不实现内容生成，也不以多 worker 为运行目标。
 当前主线是查询契约已稳定的前提下推进 Agent 演进：
 保持属性和关系证据、多轮上下文、来源披露和固定集评测不回归，
-检索规划、证据审核 Agent、未知实体边界、多轮全量、动态多跳、阶段耗时观测和 220 条产品集已完成；P5.1 独立检索子图 v1 已在 `codex/p5-retrieval-subgraph` 实现，默认测试、真实 Neo4j/Redis 和浏览器关键链路通过，外部模型相关回归待恢复后补跑；人工事实复核并行推进。
+检索规划、证据审核 Agent、未知实体边界、多轮全量、动态多跳、阶段耗时观测和 220 条产品集已完成；P5.1 独立检索子图 v1 已合入三条分支，默认测试、真实 Neo4j/Redis 和浏览器关键链路通过，外部模型相关回归待恢复后补跑；人工事实复核并行推进。
 内部试用和公开上线工程化后续再做。
 开发前按 AGENTS.md 给出方案并等待确认。
 ```
 
-## 14. 2026-11-15 交接快照
+## 14. 2026-11-18 交接快照
 
 ### 14.1 分支状态
 
-| 分支 | 提交 | 远程状态 |
+| 分支 | P5.1 代码基线 | 远程状态 |
 | --- | --- | --- |
-| `main` | `fec44e9` | `origin/main` 已同步 |
-| `dev` | `fec44e9` | `origin/dev` 已同步 |
-| `codex/p5-retrieval-subgraph` | `fec44e9` | `origin/codex/p5-retrieval-subgraph` 已同步 |
+| `main` | `2eac508` | `origin/main` 已同步 |
+| `dev` | `2eac508` | `origin/dev` 已同步 |
+| `codex/p5-retrieval-subgraph` | `2eac508` | `origin/codex/p5-retrieval-subgraph` 已同步 |
 
-所有本地分支均未落后于各自上游。P5.1 已合并到 `main/dev`。
+三条分支的 P5.1 代码内容一致，文档校正提交随后同步到三条分支。P5.1 已合并到 `main/dev`。
 
 ### 14.2 P5.1 当前成果
 
@@ -394,6 +394,8 @@ product-quality-roadmap.md，再检查 git status。
 ca190ff docs: 规划检索Agent独立子图
 548702f refactor: 拆分检索Agent独立子图
 1234a12 docs: 记录检索Agent独立子图验收
+fec44e9 docs: 准备P5.1分支交接快照
+2eac508 docs: 同步P5.1验收交接状态
 ```
 
 ### 14.3 当前验证状态
