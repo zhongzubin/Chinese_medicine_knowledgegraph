@@ -32,7 +32,7 @@
 | Agent 基础层 | 已完成；角色注册、受控检索 Agent 闭环和证据审核 Agent 已接入 |
 | P5.1 检索 Agent 独立子图 | v1 已实现并合入三条分支；自动化和浏览器关键链路通过；外部模型相关回归待补 |
 | 演示工作台 V1 范围 | 已拆分为 V1.0 核心版和 V1.1 增强版，取舍已记录 |
-| 阶段 1 应用层与 Tool | 准备实施；保持 V1 API 和现有内核不回归 |
+| 阶段 1 应用层与 Tool | 已完成；四个只读 Tool、EntityId 和邻居查询通过单元测试 |
 | M5 微调/部署增强 | 未开始 |
 
 明确不在当前范围：
@@ -300,8 +300,8 @@ uv run python -m pytest tests/ -v
 
 当前优先级：
 
-1. 实施阶段 1：应用服务、EntityId、四个只读 Tool 和契约测试。
-2. 实现 API V2 核心接口，保持 `/api/v1` 不回归。
+1. 实现 API V2 核心接口，复用阶段 1 应用服务和四个只读 Tool。
+2. 保持 `/api/v1`、GraphQAEngine、Cypher Guard 和证据审核不回归。
 3. 开发 Vue 证据问答和图谱探索页面。
 4. 完成 V1.0 Preview 首次公网部署、匿名配额和异常状态。
 5. V1.0 质量签收后，再实施对比、报告、Skill Registry 和本地 stdio MCP。
@@ -411,6 +411,7 @@ be5dea4 docs: 清理过期文档并更新索引
 
 ### 14.3 当前验证状态
 
+- 2026-11-21 阶段 1 全量 pytest：`294 passed, 5 skipped`。
 - 2026-11-21 范围修订分支默认全量 pytest：`275 passed, 5 skipped`。
 - 2026-11-16 默认全量 pytest：`275 passed, 5 skipped`。
 - 2026-11-16 真实 Redis 限流、并发和会话测试：`3 passed`。
@@ -439,14 +440,13 @@ be5dea4 docs: 清理过期文档并更新索引
 
 ## 15. Vue 演示工作台 V1.0/V1.1 交接入口
 
-范围修订已确认，实施从迁移方案的阶段 1 开始：
+范围修订已确认，阶段 1 已完成：
 
-1. 在 `graph_qa/application/` 增加应用服务。
-2. 在 `graph_qa/tools/` 增加 Tool 契约、Registry 和 Executor。
-3. 首批实现 `resolve_entity`、`query_entity_facts`、`query_neighbors` 和 `find_evidence_paths`。
-4. 增加 EntityId 映射和契约测试。
-5. 保持 V1 API 和现有 GraphQAEngine 可用。
-6. V1.0 核心页面完成后再安排首次部署，不等待 V1.1。
+1. 应用服务、EntityId、Tool 契约、Registry 和 Executor 已完成。
+2. `resolve_entity`、`query_entity_facts`、`query_neighbors` 和 `find_evidence_paths` 已实现。
+3. 下一阶段实现 API V2 核心接口。
+4. 保持 V1 API 和现有 GraphQAEngine 可用。
+5. V1.0 核心页面完成后再安排首次部署，不等待 V1.1。
 
 实施入口文档：
 
@@ -455,5 +455,6 @@ be5dea4 docs: 清理过期文档并更新索引
 - [重构与迁移方案](重构与迁移方案-2026-11-21.md)
 - [项目验收方案](项目验收方案-2026-11-21.md)
 - [V1 版本范围与技术取舍](V1版本范围与技术取舍-2026-11-21.md)
+- [阶段 1 应用层与 Tool 实现记录](阶段1应用层与Tool实现记录-2026-11-21.md)
 
 当前阶段 1 实现分支为 `codex/vue-phase1-app-tools`，不直接在 `main/dev` 上编码。

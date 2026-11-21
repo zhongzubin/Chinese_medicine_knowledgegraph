@@ -16,6 +16,7 @@
 - 使用本地 BGE-large + FAISS 补充别名和同义表达召回。
 - 提供 CLI、FastAPI SSE 接口和 Streamlit 双栏交互界面。
 - 使用 Redis 保存 5 轮会话，并提供 API Key、限流和全局并发控制。
+- 提供阶段 1 图谱证据应用服务、内容派生 EntityId 和四个版本化只读 Tool。
 
 ## 下一阶段设计
 

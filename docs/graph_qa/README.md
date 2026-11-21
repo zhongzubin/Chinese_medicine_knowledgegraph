@@ -31,6 +31,7 @@ Tool Registry 保留在 V1.0，因为 API V2、Vue 和后续 MCP 需要共用同
 ### 当前实现与运行
 
 - [交接说明](HANDOFF.md)
+- [阶段 1 应用层与 Tool 实现记录](阶段1应用层与Tool实现记录-2026-11-21.md)
 - [当前实现架构](architecture.md)
 - [数据与接口契约](contracts.md)
 - [安全与评测规范](security-and-evaluation.md)
