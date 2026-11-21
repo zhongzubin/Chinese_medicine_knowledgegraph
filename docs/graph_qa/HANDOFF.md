@@ -4,7 +4,7 @@
 >
 > 交接日期：2026-11-21
 >
-> 当前分支：`codex/vue-refactor-design`
+> 当前实现分支：`codex/vue-phase1-app-tools`
 
 本文用于新对话快速恢复上下文。开始开发前仍须完整阅读 `AGENTS.md`、`docs/graph_qa/README.md`、`architecture.md`、`contracts.md`、`security-and-evaluation.md`，以及 Vue 演示版的需求、架构、迁移和验收文档。
 
@@ -31,7 +31,8 @@
 | 质量验收与基础 CI | 基础 CI 已合入；分支已收敛；最新远程 CI 结果待确认；人工审核 0/50 |
 | Agent 基础层 | 已完成；角色注册、受控检索 Agent 闭环和证据审核 Agent 已接入 |
 | P5.1 检索 Agent 独立子图 | v1 已实现并合入三条分支；自动化和浏览器关键链路通过；外部模型相关回归待补 |
-| 演示工作台 V1 设计 | 需求、技术架构、迁移和验收文档已确认，进入实施阶段 |
+| 演示工作台 V1 范围 | 已拆分为 V1.0 核心版和 V1.1 增强版，取舍已记录 |
+| 阶段 1 应用层与 Tool | 准备实施；保持 V1 API 和现有内核不回归 |
 | M5 微调/部署增强 | 未开始 |
 
 明确不在当前范围：
@@ -299,12 +300,13 @@ uv run python -m pytest tests/ -v
 
 当前优先级：
 
-1. 评审并冻结 Vue 演示版 V1 的需求、架构、迁移和验收文档。
-2. 按迁移方案实现应用层、Tool Registry 与 API V2。
+1. 实施阶段 1：应用服务、EntityId、四个只读 Tool 和契约测试。
+2. 实现 API V2 核心接口，保持 `/api/v1` 不回归。
 3. 开发 Vue 证据问答和图谱探索页面。
-4. 完成 Skill Registry 和本地 stdio MCP。
-5. 恢复外部模型服务后补跑 P5.1 和完整固定集。
-6. 独立领域审核者完成 50 条人工事实复核。
+4. 完成 V1.0 Preview 首次公网部署、匿名配额和异常状态。
+5. V1.0 质量签收后，再实施对比、报告、Skill Registry 和本地 stdio MCP。
+6. 恢复外部模型服务后补跑 P5.1 和完整固定集。
+7. 独立领域审核者完成 50 条人工事实复核，作为 V1.1 门禁。
 
 ### 12.1 当前质量基线
 
@@ -354,7 +356,7 @@ uv run python -m pytest tests/ -v
 - Text2Cypher 只能作为受控回退，不能替代属性/关系统一证据。
 - 安全校验、只读执行和证据校验保持确定性实现。
 - Agent 演进先从角色边界、契约和可观测性开始；确定性查询与审核边界不得削弱。
-- 从 `main` 创建独立功能分支。
+- 从当前设计基线或 `main` 创建独立短生命周期功能分支。
 - 出现不可接受回归时回退到本地演示基线或 `18382f6`。
 
 ## 13. 新对话建议开场
@@ -366,8 +368,9 @@ product-quality-roadmap.md，再检查 git status。
 当前不实现内容生成，也不以多 worker 为运行目标。
 当前主线是查询契约已稳定的前提下推进 Agent 演进：
 保持属性和关系证据、多轮上下文、来源披露和固定集评测不回归，
-当前已确认 Vue 3 演示工作台、API V2、Tool/Skill Registry 和本地 stdio MCP 的设计基线。
-下一步从应用服务层和 Tool Registry 开始实施；P5.1 的模型相关回归和人工事实复核继续保留为质量门禁。
+当前已确认 Vue 3 演示工作台、API V2、只读 Tool、Skill Registry 和本地 stdio MCP 的设计基线。
+V1.0 只阻塞证据问答、图谱探索、四个 Tool、证据审核和首次部署；对比、报告、Skill、MCP 与人工完整签收属于 V1.1。
+下一步从阶段 1 的应用服务和只读 Tool 开始实施；P5.1 模型回归和人工事实复核继续保留为质量门禁。
 开发前按 AGENTS.md 给出方案并等待确认。
 ```
 
@@ -380,9 +383,10 @@ product-quality-roadmap.md，再检查 git status。
 | `main` | `847f0e6` | `origin/main` 已同步 |
 | `dev` | `847f0e6` | `origin/dev` 已同步 |
 | `codex/p5-retrieval-subgraph` | `847f0e6` | `origin/codex/p5-retrieval-subgraph` 已同步 |
-| `codex/vue-refactor-design` | `be5dea4` | `origin/codex/vue-refactor-design` 已同步 |
+| `codex/vue-refactor-design` | `f029819` | `origin/codex/vue-refactor-design` 已同步 |
+| `codex/vue-phase1-app-tools` | 基于 `f029819` | 本地实现分支，尚未同步远程 |
 
-`main/dev` 和 P5.1 分支的代码内容一致。Vue 重构设计分支包含后续四份设计文档和文档清理提交，尚未合入主线。
+`main/dev` 和 P5.1 分支的代码内容一致。Vue 设计分支包含后续四份设计文档和文档清理提交，尚未合入主线。实现分支用于 V1 范围修订和阶段 1，后续提交不直接进入 `main/dev`。
 
 ### 14.2 P5.1 当前成果
 
@@ -407,6 +411,7 @@ be5dea4 docs: 清理过期文档并更新索引
 
 ### 14.3 当前验证状态
 
+- 2026-11-21 范围修订分支默认全量 pytest：`275 passed, 5 skipped`。
 - 2026-11-16 默认全量 pytest：`275 passed, 5 skipped`。
 - 2026-11-16 真实 Redis 限流、并发和会话测试：`3 passed`。
 - 2026-11-16 真实 Neo4j 集成测试：通过。
@@ -422,24 +427,26 @@ be5dea4 docs: 清理过期文档并更新索引
 
 ### 14.4 续作顺序
 
-1. 恢复外部模型服务。
-2. 重跑 API 跨实例、120 条、220 条、62 轮和动态多跳固定集。
-3. 确认 GitHub Actions 和真实依赖回归全部通过。
-4. 全部回归通过后删除 `codex/p5-retrieval-subgraph`，只保留 `main/dev`。
-5. 独立领域审核者完成 50 条人工事实复核。
-6. 质量门禁通过后再启动 P5.2。
+1. 实施阶段 1，并保持默认全量 pytest 通过。
+2. 实现 API V2 核心接口和 Vue 证据问答、图谱探索。
+3. 完成 V1.0 Preview 首次部署，再执行 V1.0 质量签收。
+4. 并行恢复外部模型服务并重跑 API 跨实例、120 条、220 条、62 轮和动态多跳固定集。
+5. V1.0 稳定后实施对比、报告、Skill 和 MCP。
+6. V1.1 门禁前完成 50 条人工事实复核。
+7. 相关回归通过后清理 P5.1 短生命周期分支。
 
 外部模型恢复前，不把 P5.1 标记为最终验收完成。代码当前已合并，但不能据此宣称固定集回归通过。
 
-## 15. Vue 演示工作台 V1 交接入口
+## 15. Vue 演示工作台 V1.0/V1.1 交接入口
 
-设计已确认，实施从迁移方案的阶段 1 开始：
+范围修订已确认，实施从迁移方案的阶段 1 开始：
 
 1. 在 `graph_qa/application/` 增加应用服务。
 2. 在 `graph_qa/tools/` 增加 Tool 契约、Registry 和 Executor。
 3. 首批实现 `resolve_entity`、`query_entity_facts`、`query_neighbors` 和 `find_evidence_paths`。
 4. 增加 EntityId 映射和契约测试。
 5. 保持 V1 API 和现有 GraphQAEngine 可用。
+6. V1.0 核心页面完成后再安排首次部署，不等待 V1.1。
 
 实施入口文档：
 
@@ -447,5 +454,6 @@ be5dea4 docs: 清理过期文档并更新索引
 - [技术与架构设计](技术与架构设计-2026-11-21.md)
 - [重构与迁移方案](重构与迁移方案-2026-11-21.md)
 - [项目验收方案](项目验收方案-2026-11-21.md)
+- [V1 版本范围与技术取舍](V1版本范围与技术取舍-2026-11-21.md)
 
-进入实现前必须从当前 `main` 或设计分支创建新的短生命周期功能分支，不在 `main/dev` 上直接编码。
+当前阶段 1 实现分支为 `codex/vue-phase1-app-tools`，不直接在 `main/dev` 上编码。
