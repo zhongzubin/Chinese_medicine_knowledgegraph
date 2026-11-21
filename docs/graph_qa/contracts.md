@@ -1,9 +1,9 @@
 # 知识图谱问答数据与接口契约
 
-> 文档状态：当前实现基线 v1.2
+> 文档状态：当前实现基线 v1.3
 >
-> 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit、查询扩展与 Agent 基础层
-> 最后更新：2026-11-01
+> 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit、查询扩展与 Agent 基础层、V2 API
+> 最后更新：2026-11-21
 
 本文定义 CLI、内部模块、FastAPI、Redis 会话、SSE 和 Streamlit 客户端必须遵守的当前契约。
 
@@ -673,3 +673,95 @@ M1 CLI 和评测继续使用无会话调用，不依赖 Redis 会话状态。
 - 安全错误码不得改为“成功但无结果”。
 - 图元数据版本变化时，必须运行实体索引和黄金问题集回归。
 - 测试和日志中不得出现真实模型密钥、数据库密码或完整用户健康文本。
+
+## 10. V2 公共 API
+
+### 10.1 路由
+
+V2 当前提供：
+
+- `POST /api/v2/qa`
+- `POST /api/v2/qa/stream`
+- `POST /api/v2/entities/search`
+- `GET /api/v2/entities/{entity_id}`
+- `GET /api/v2/entities/{entity_id}/neighbors`
+- `POST /api/v2/paths`
+- `GET /api/v2/tools`
+- `GET /api/v2/schema/summary`
+
+V1 路由继续使用 `X-API-Key`。V2 面向同源公开演示，不接收静态 API Key，并由匿名 Cookie、IP 限流和全局并发租约保护。
+
+### 10.2 响应包络
+
+除 SSE 流以外，V2 使用：
+
+```text
+ApiEnvelope<T>
+- request_id: str
+- run_id: str | null
+- data: T | null
+- evidence: list[Evidence]
+- warnings: list[Warning]
+- error: ApiError | null
+- meta: ResponseMeta
+```
+
+`ResponseMeta` 包含 `schema_version`、可选 `tool_version`/`skill_version`、`duration_ms` 和 `degraded`。
+
+`Warning` 包含稳定 `code` 和用户可见 `message`；`ApiError` 包含稳定 `code` 和脱敏 `message`。
+
+V2 请求校验失败也返回该包络，不使用 FastAPI 默认 `detail` 结构。
+
+### 10.3 匿名会话
+
+- 匿名会话 Cookie 名称为 `tcmkg_demo_session`。
+- Cookie 使用 `HttpOnly`、`SameSite=Lax` 和 `/api/v2` 路径。
+- 公网 HTTPS 部署必须将 `GRAPH_QA_DEMO_COOKIE_SECURE=true`。
+- Cookie 值是随机 UUID，仅作为会话 ID，不包含个人信息。
+- 会话以固定匿名客户端作用域和随机 Cookie 隔离；不同 Cookie 使用不同 Redis 会话键。
+- V2 响应数据不回显 `session_id`，会话 ID 只保存在 HttpOnly Cookie 中。
+- 会话继续使用 Redis 最近 5 轮、TTL、单会话锁和失败轮次隔离。
+
+### 10.4 匿名限流
+
+- V2 所有公开路由消耗按 IP 的滑动窗口额度。
+- 默认值为 `GRAPH_QA_RATE_LIMIT_REQUESTS` 和 `GRAPH_QA_RATE_LIMIT_WINDOW_SECONDS`。
+- 同源 Nginx 部署应设置 `GRAPH_QA_TRUST_PROXY_HEADERS=true`，服务端只读取 `X-Forwarded-For` 的第一跳作为客户端 IP。
+- 服务不信任代理头时，只使用直连 `request.client.host`。
+- 限流服务不可用时失败关闭，返回 `503 RATE_LIMIT_UNAVAILABLE`。
+- 超过额度返回 `429 RATE_LIMITED`，并携带 `RateLimit-*` 和 `Retry-After`。
+
+每日模型调用硬预算属于 V1.0 部署阶段，阶段 2 尚未实现。
+
+### 10.5 QA 与 SSE
+
+`POST /api/v2/qa` 的 `data` 为现有 `GraphQAResponse`。业务无依据仍返回 HTTP 200；安全拒绝、会话、限流、超时和内部错误继续使用稳定错误码与对应 HTTP 状态。
+
+`POST /api/v2/qa/stream` 保留 V1 事件：
+
+- `stage`
+- `evidence`
+- `facts`
+- `aggregates`
+- `paths`
+- `audit`
+- `answer_delta`
+- `warning`
+- `error`
+- `done`
+
+SSE 不套用 JSON 包络。完成事件中的 `response` 仍为 `GraphQAResponse`。
+
+### 10.6 Tool 路由
+
+- 实体搜索、实体详情、邻居和路径路由调用阶段 1 的 Tool/Application 层，不直接查询 Neo4j。
+- `GET /api/v2/tools` 返回版本化 ToolDefinition、输入 Schema 和输出 Schema。
+- Tool 只返回领域 DTO 和证据，不返回原始 Cypher、查询参数或数据库连接信息。
+- Tool 参数错误返回 422，未知实体返回 404，查询超时返回 504，执行失败返回 502。
+
+### 10.7 未完成边界
+
+- 阶段 2 不包含 Vue 页面。
+- 阶段 2 不包含匿名 Cookie 签名或用户身份。
+- 阶段 2 不包含每日模型预算。
+- 阶段 2 不包含 Skill 和 MCP 路由。
