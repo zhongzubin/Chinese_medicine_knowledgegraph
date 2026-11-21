@@ -4,7 +4,7 @@
 >
 > 交接日期：2026-11-21
 >
-> 当前实现分支：`codex/vue-phase1-app-tools`
+> 当前主线分支：`main`
 
 本文用于新对话快速恢复上下文。开始开发前仍须完整阅读 `AGENTS.md`、`docs/graph_qa/README.md`、`architecture.md`、`contracts.md`、`security-and-evaluation.md`，以及 Vue 演示版的需求、架构、迁移和验收文档。
 
@@ -384,13 +384,16 @@ V1.0 只阻塞证据问答、图谱探索、四个 Tool、证据审核和首次�
 
 | 分支 | 当前提交 | 远程状态 |
 | --- | --- | --- |
-| `main` | `847f0e6` | `origin/main` 已同步 |
-| `dev` | `847f0e6` | `origin/dev` 已同步 |
-| `codex/p5-retrieval-subgraph` | `847f0e6` | `origin/codex/p5-retrieval-subgraph` 已同步 |
-| `codex/vue-refactor-design` | `f029819` | `origin/codex/vue-refactor-design` 已同步 |
-| `codex/vue-phase1-app-tools` | 基于 `f029819` | 本地实现分支，尚未同步远程 |
+| `main` | `0c462f6` | `origin/main` 已同步 |
+| `dev` | `0c462f6` | `origin/dev` 已同步 |
 
-`main/dev` 和 P5.1 分支的代码内容一致。Vue 设计分支包含后续四份设计文档和文档清理提交，尚未合入主线。实现分支用于 V1 范围修订和阶段 1，后续提交不直接进入 `main/dev`。
+阶段 1～3 已合并到 `main/dev`。以下短生命周期分支在合并后已删除：
+
+- `codex/p5-retrieval-subgraph`
+- `codex/vue-refactor-design`
+- `codex/vue-phase1-app-tools`
+
+仓库只保留长期维护的 `main` 和 `dev`。
 
 ### 14.2 P5.1 当前成果
 
@@ -469,4 +472,4 @@ be5dea4 docs: 清理过期文档并更新索引
 - [阶段 2 API V2 实现记录](阶段2API-V2实现记录-2026-11-21.md)
 - [阶段 3 Vue 证据问答实现记录](阶段3Vue证据问答实现记录-2026-11-21.md)
 
-当前阶段 1 实现分支为 `codex/vue-phase1-app-tools`，不直接在 `main/dev` 上编码。
+阶段 1～3 已合并到 `main/dev`。后续阶段从 `main` 创建新的短生命周期分支，完成后合并并删除。
