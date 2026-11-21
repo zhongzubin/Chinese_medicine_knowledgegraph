@@ -148,7 +148,7 @@ models/bge-large-zh-v1.5
 | `graph_qa/redis_limits.py` | Redis 限流和全局并发租约 |
 | `graph_qa/api.py` | FastAPI、鉴权、会话和 SSE 路由 |
 | `graph_qa/api_security.py` | 多 API Key 配置和校验 |
-| `graph_qa/streamlit_app.py` | Streamlit 双栏客户端 |
+| `graph_qa/streamlit_app.py` | Streamlit 双栏客户端；迁移期回滚入口 |
 | `evaluation/qa_cases.jsonl` | 120 条黄金问题 |
 | `evaluation/product_quality_cases.jsonl` | 220 条产品固定集，覆盖属性、关系、聚合、多条件、动态多跳、semantic、未知实体、无依据和无来源 |
 | `evaluation/multi_turn_cases.jsonl` | 20 组 62 轮多轮固定集 |

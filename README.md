@@ -5,6 +5,9 @@
 目标系统架构和 Vue 演示版技术方案见
 [技术与架构设计](docs/graph_qa/技术与架构设计-2026-11-21.md)。
 
+不清楚哪些目录参与当前运行、哪些只用于数据重建或回滚时，先看
+[项目文件地图](项目文件地图.md)。
+
 项目当前支持：
 
 - 从中药百科采集中药材和方剂数据，支持限流、断点续爬与 Excel 导出。
@@ -93,22 +96,28 @@ LIMIT 25;
 
 ```text
 .
-├── common/                    # 环境配置与 LLM 初始化
-├── crawler/                   # 中药、方剂网页采集
+├── frontend/                  # Vue 3 证据问答工作台
+├── graph_qa/                  # 问答内核、API V1/V2、Tool 和 Agent
+│   ├── application/           # 应用服务
+│   ├── interfaces/api/        # V2 REST/SSE
+│   ├── tools/                 # 只读 Tool Registry
+│   └── streamlit_app.py       # 迁移期回滚入口
+├── common/                    # 共享环境配置与模型初始化
+├── crawler/                   # 数据生产：中药、方剂采集
 │   ├── data/                  # 本地原始数据，默认不提交
 │   ├── .cache/                # 断点续爬缓存，默认不提交
 │   ├── fangji_spider.py
 │   └── zhongyao_spider.py
-├── extract_information/       # 规则与 LLM 实体关系抽取
-├── graph_database/
+├── extract_information/       # 数据生产：实体关系抽取
+├── graph_database/            # 数据生产：图谱导入与元数据导出
 │   ├── import_data.py         # Neo4j 批量导入
 │   └── export_metadata.py     # 中文图数据库元数据导出
-├── graph_qa/                  # LangGraph 问答、FAISS、FastAPI、Streamlit
 ├── evaluation/                # 黄金问题集
 ├── metadata/                  # 已导出的图结构元数据
-├── tests/                     # pytest 单元测试
+├── tests/                     # pytest 与浏览器 fixture
+├── docs/                      # 当前设计、契约和历史验收资料
+├── scripts/                   # 启动、停止和数据生成工具
 ├── compose.redis.yml          # 可选本地 Redis
-├── demo/                      # LangChain 示例
 ├── pyproject.toml
 └── uv.lock
 ```
