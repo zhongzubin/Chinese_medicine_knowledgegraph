@@ -83,6 +83,8 @@ class APISettings:
     session_ttl_seconds: int = 86400
     session_max_turns: int = 5
     session_lock_seconds: int = 180
+    demo_cookie_secure: bool = False
+    demo_trust_proxy_headers: bool = False
 
     def __post_init__(self) -> None:
         if not self.redis_url:
@@ -160,6 +162,14 @@ class APISettings:
             session_lock_seconds=_read_positive_int(
                 "GRAPH_QA_SESSION_LOCK_SECONDS",
                 180,
+            ),
+            demo_cookie_secure=_read_bool(
+                "GRAPH_QA_DEMO_COOKIE_SECURE",
+                False,
+            ),
+            demo_trust_proxy_headers=_read_bool(
+                "GRAPH_QA_TRUST_PROXY_HEADERS",
+                False,
             ),
         )
 

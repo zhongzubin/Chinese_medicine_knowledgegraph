@@ -15,6 +15,7 @@ from graph_qa.application.contracts import (
 )
 from graph_qa.application.entity_ids import EntityIdMapper, entity_id_for
 from graph_qa.application.graph_evidence_service import GraphEvidenceService
+from graph_qa.application.qa_service import QAApplicationService
 
 __all__ = [
     "EntityFactsData",
@@ -27,6 +28,7 @@ __all__ = [
     "GraphEvidenceService",
     "NeighborEdge",
     "PathStepSpec",
+    "QAApplicationService",
     "ResolvedEntity",
     "ResolveEntityData",
     "entity_id_for",

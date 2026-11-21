@@ -35,6 +35,18 @@ def test_settings_load_multiple_keys_and_hide_values_from_repr(monkeypatch):
     assert "redis://unit-test" not in repr(settings)
 
 
+def test_settings_load_anonymous_demo_cookie_and_proxy_flags(monkeypatch):
+    monkeypatch.setenv("GRAPH_QA_REDIS_URL", "redis://unit-test:6379/0")
+    monkeypatch.setenv("GRAPH_QA_API_KEYS_JSON", json.dumps({"client-a": "a" * 32}))
+    monkeypatch.setenv("GRAPH_QA_DEMO_COOKIE_SECURE", "true")
+    monkeypatch.setenv("GRAPH_QA_TRUST_PROXY_HEADERS", "true")
+
+    settings = APISettings.from_environment()
+
+    assert settings.demo_cookie_secure is True
+    assert settings.demo_trust_proxy_headers is True
+
+
 def test_settings_require_key_when_auth_is_enabled():
     with pytest.raises(APIConfigurationError, match="至少配置一个 API Key"):
         make_settings(api_keys={})

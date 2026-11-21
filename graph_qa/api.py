@@ -14,11 +14,17 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import APIKeyHeader
 
+from graph_qa.application.graph_evidence_service import GraphEvidenceService
+from graph_qa.application.qa_service import QAApplicationService
 from graph_qa.api_security import (
     APIConfigurationError,
     APIKeyAuthenticator,
     APISettings,
     AuthenticationError,
+)
+from graph_qa.interfaces.api.v2 import (
+    build_validation_error_response,
+    create_v2_router,
 )
 from graph_qa.cli import build_engine_from_environment
 from graph_qa.models import (
@@ -40,6 +46,9 @@ from graph_qa.session_store import (
     RedisConversationStore,
     SessionStoreError,
 )
+from graph_qa.tools.catalog.graph_evidence import build_tool_registry
+from graph_qa.tools.executor import ToolExecutor
+from graph_qa.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +184,10 @@ def create_app(
         active_store: Optional[LimitStore] = None
         active_session_store: Optional[ConversationStore] = None
         active_engine: Optional[QAEngine] = None
+        active_qa_service: Optional[QAApplicationService] = None
+        active_graph_service: Optional[GraphEvidenceService] = None
+        active_tool_executor: Optional[ToolExecutor] = None
+        active_tool_registry: Optional[ToolRegistry] = None
         try:
             active_settings = settings or APISettings.from_environment()
             authenticator = APIKeyAuthenticator(active_settings)
@@ -185,12 +198,38 @@ def create_app(
             if not active_session_store.ping():
                 raise APIConfigurationError("Redis 会话存储不可用")
             active_engine = engine_builder(active_settings)
+            active_qa_service = QAApplicationService(active_engine)
+            if all(
+                hasattr(active_engine, attribute)
+                for attribute in ("repository", "schema", "entity_index")
+            ):
+                graph_service = None
+                tool_registry = None
+                tool_executor = None
+                try:
+                    graph_service = GraphEvidenceService.from_engine(
+                        active_engine
+                    )
+                    tool_registry = build_tool_registry(graph_service)
+                    tool_executor = ToolExecutor(tool_registry)
+                except Exception as exc:
+                    _close_quietly(tool_executor)
+                    logger.warning(
+                        "V2 图谱 Tool 初始化失败: %s",
+                        type(exc).__name__,
+                    )
+                else:
+                    active_graph_service = graph_service
+                    active_tool_registry = tool_registry
+                    active_tool_executor = tool_executor
         except APIConfigurationError:
+            _close_quietly(active_tool_executor)
             _close_quietly(active_store)
             _close_quietly(active_session_store)
             _close_quietly(active_engine)
             raise
         except Exception as exc:
+            _close_quietly(active_tool_executor)
             _close_quietly(active_store)
             _close_quietly(active_session_store)
             _close_quietly(active_engine)
@@ -201,10 +240,15 @@ def create_app(
         application.state.limit_store = active_store
         application.state.session_store = active_session_store
         application.state.engine = active_engine
+        application.state.qa_service = active_qa_service
+        application.state.graph_evidence_service = active_graph_service
+        application.state.tool_registry = active_tool_registry
+        application.state.tool_executor = active_tool_executor
         try:
             yield
         finally:
             repository = getattr(active_engine, "repository", None)
+            _close_quietly(active_tool_executor)
             _close_quietly(repository)
             _close_quietly(active_store)
             _close_quietly(active_session_store)
@@ -214,13 +258,16 @@ def create_app(
         version="1.0.0",
         lifespan=lifespan,
     )
+    application.include_router(create_v2_router())
 
     @application.exception_handler(RequestValidationError)
     async def request_validation_error_handler(
         request: Request,
         exc: RequestValidationError,
     ) -> JSONResponse:
-        del request, exc
+        del exc
+        if request.url.path.startswith("/api/v2/"):
+            return build_validation_error_response()
         return _error_response(
             request_id=str(uuid.uuid4()),
             question="",
