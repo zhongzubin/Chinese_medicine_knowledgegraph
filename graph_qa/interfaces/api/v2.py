@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Iterator, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from graph_qa.application.contracts import (
@@ -115,6 +115,16 @@ def _set_demo_cookie(
         samesite="lax",
         secure=settings.demo_cookie_secure,
         path="/api/v2",
+    )
+
+
+def _clear_demo_cookie(response: Response, request: Request) -> None:
+    response.delete_cookie(
+        key=DEMO_SESSION_COOKIE,
+        path="/api/v2",
+        secure=request.app.state.settings.demo_cookie_secure,
+        httponly=True,
+        samesite="lax",
     )
 
 
@@ -845,6 +855,89 @@ def create_v2_router() -> APIRouter:
             content=envelope.model_dump(mode="json"),
             headers=headers,
         )
+
+    @router.delete(
+        "/session",
+        status_code=204,
+        responses={
+            409: {"model": ApiEnvelope[Any]},
+            429: {"model": ApiEnvelope[Any]},
+            503: {"model": ApiEnvelope[Any]},
+        },
+    )
+    def clear_session(request: Request):
+        started_at = time.perf_counter()
+        request_id = _request_id()
+        rate_decision, rate_error = _rate_limit_response(
+            request,
+            request_id,
+            started_at,
+        )
+        if rate_error is not None:
+            return rate_error
+        headers = rate_decision.headers()
+        cookie_value = request.cookies.get(DEMO_SESSION_COOKIE)
+        if cookie_value:
+            try:
+                session_id = str(UUID(cookie_value))
+            except ValueError:
+                session_id = None
+            if session_id is not None:
+                session_store: ConversationStore = (
+                    request.app.state.session_store
+                )
+                try:
+                    locked = session_store.acquire_lock(
+                        ANONYMOUS_SESSION_CLIENT_ID,
+                        session_id,
+                        request_id,
+                    )
+                except SessionStoreError as exc:
+                    logger.warning("清理 V2 会话锁失败: %s", str(exc))
+                    return _error_response(
+                        request_id,
+                        started_at,
+                        503,
+                        ErrorCode.SESSION_UNAVAILABLE.value,
+                        "会话服务暂时不可用",
+                        headers=headers,
+                    )
+                if not locked:
+                    return _error_response(
+                        request_id,
+                        started_at,
+                        409,
+                        ErrorCode.SESSION_BUSY.value,
+                        "该会话正在处理其他问题",
+                        headers=headers,
+                    )
+                try:
+                    session_store.delete(
+                        ANONYMOUS_SESSION_CLIENT_ID,
+                        session_id,
+                    )
+                except SessionStoreError as exc:
+                    logger.warning("清理 V2 会话失败: %s", str(exc))
+                    return _error_response(
+                        request_id,
+                        started_at,
+                        503,
+                        ErrorCode.SESSION_UNAVAILABLE.value,
+                        "会话服务暂时不可用",
+                        headers=headers,
+                    )
+                finally:
+                    try:
+                        session_store.release_lock(
+                            ANONYMOUS_SESSION_CLIENT_ID,
+                            session_id,
+                            request_id,
+                        )
+                    except SessionStoreError:
+                        pass
+        response = Response(status_code=204, headers=headers)
+        _clear_demo_cookie(response, request)
+        return response
 
     @router.get(
         "/schema/summary",

@@ -377,6 +377,7 @@ def test_v2_openapi_exposes_core_routes_and_envelope():
     assert "/api/v2/entities/{entity_id}/neighbors" in paths
     assert "/api/v2/paths" in paths
     assert "/api/v2/tools" in paths
+    assert "/api/v2/session" in paths
     assert not paths["/api/v2/qa"]["post"].get("security")
     schemas = response.json()["components"]["schemas"]
     assert "ResolveEntityData" in schemas
@@ -433,6 +434,27 @@ def test_v2_stream_uses_existing_events_and_persists_completed_turn():
     assert next(iter(session_store.sessions.values()))[0].question == (
         "麻黄有什么功效？"
     )
+
+
+def test_v2_can_clear_current_anonymous_session_and_cookie():
+    app, _engine, _store, session_store = make_app()
+
+    with TestClient(app) as client:
+        first = client.post(
+            "/api/v2/qa",
+            json={"question": "麻黄有什么功效？"},
+        )
+        session_id = first.cookies.get(DEMO_SESSION_COOKIE)
+        deleted = client.delete("/api/v2/session")
+
+    assert session_id
+    assert deleted.status_code == 204
+    assert not deleted.cookies.get(DEMO_SESSION_COOKIE)
+    assert (
+        ANONYMOUS_SESSION_CLIENT_ID,
+        session_id,
+    ) not in session_store.sessions
+    assert session_store.locks == set()
 
 
 def test_v2_tool_catalog_schema_and_entity_routes_do_not_require_api_key():
