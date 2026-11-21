@@ -72,7 +72,7 @@
 - 已实现精确名称、别名、fuzzy 和 BGE + FAISS 实体召回。
 - 单跳关系查询以单三元组路径和固定证据字段为基础，并已增加多条件交集列表和 Schema 约束 2～3 步动态多跳。
 - Redis 已支持最近 5 轮问题、回答、已链接实体和 grounded 状态。
-- 当前全量测试为 309 passed、5 skipped。
+- 当前 Python 全量测试为 310 passed、5 skipped；前端 Vitest 7 passed。
 - 当前 120 条固定评测 outcome 为 119/120，完整工作流实体 Recall@3 为 97.78%。
 - 原 120 条评测仍未覆盖属性事实，也没有显式 `no_evidence` 用例。
 

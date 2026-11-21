@@ -688,6 +688,7 @@ V2 当前提供：
 - `POST /api/v2/paths`
 - `GET /api/v2/tools`
 - `GET /api/v2/schema/summary`
+- `DELETE /api/v2/session`
 
 V1 路由继续使用 `X-API-Key`。V2 面向同源公开演示，不接收静态 API Key，并由匿名 Cookie、IP 限流和全局并发租约保护。
 

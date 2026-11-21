@@ -33,6 +33,7 @@ Tool Registry 保留在 V1.0，因为 API V2、Vue 和后续 MCP 需要共用同
 - [交接说明](HANDOFF.md)
 - [阶段 1 应用层与 Tool 实现记录](阶段1应用层与Tool实现记录-2026-11-21.md)
 - [阶段 2 API V2 实现记录](阶段2API-V2实现记录-2026-11-21.md)
+- [阶段 3 Vue 证据问答实现记录](阶段3Vue证据问答实现记录-2026-11-21.md)
 - [当前实现架构](architecture.md)
 - [数据与接口契约](contracts.md)
 - [安全与评测规范](security-and-evaluation.md)
@@ -124,7 +125,8 @@ Tool Registry 保留在 V1.0，因为 API V2、Vue 和后续 MCP 需要共用同
 - 尚未完成的独立领域人工事实结论和通用语义等价判断。
 - 独立 Agent 拓扑、动态调度和完全自治协作。
 - V1.0 应用服务、四个只读 Tool、API V2 和 Vue 工作台。
-- V1.0 API V2 核心路由、匿名会话和匿名限流已完成；Vue 工作台尚未实现。
+- V1.0 API V2 核心路由、匿名会话和匿名限流已完成。
+- Vue 证据问答页已完成并通过桌面、手机和异常状态浏览器实测；图谱探索页尚未实现。
 - 章节、页码和原文片段级来源对象增强。
 - 本地 stdio MCP、实体对比和报告导出仍在 V1.1，当前未实现。
 
@@ -176,7 +178,7 @@ flowchart LR
 
 ## 当前验证状态
 
-- 全量 pytest：309 passed、5 skipped。
+- 全量 pytest：310 passed、5 skipped；前端 Vitest 7 passed。
 - 黄金集：120 条；完整工作流 outcome 通过 119/120，接受门禁通过。
 - 纯召回 Recall@3：100%；完整工作流实体 Recall@3：97.78%。
 - 产品固定集：220/220 outcome 通过，接受门禁通过。

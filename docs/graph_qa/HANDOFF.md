@@ -34,6 +34,7 @@
 | 演示工作台 V1 范围 | 已拆分为 V1.0 核心版和 V1.1 增强版，取舍已记录 |
 | 阶段 1 应用层与 Tool | 已完成；四个只读 Tool、EntityId 和邻居查询通过单元测试 |
 | 阶段 2 API V2 | 已完成；匿名会话、限流、SSE、Tool 路由和 OpenAPI 通过测试 |
+| 阶段 3 Vue 证据问答 | 已完成；桌面、手机、证据/多跳路径和异常状态通过真实浏览器测试 |
 | M5 微调/部署增强 | 未开始 |
 
 明确不在当前范围：
@@ -186,7 +187,7 @@ uv run streamlit run graph_qa/streamlit_app.py
 
 ## 9. 验证基线
 
-- 当前全量 pytest：`309 passed, 5 skipped`。
+- 当前全量 pytest：`310 passed, 5 skipped`；前端 Vitest：`7 passed`。
 - 真实 Neo4j + 模型集成：本地演示和历史验收已通过；本轮默认 pytest 中按配置跳过。
 - Redis 限流、并发、会话集成：历史验收已通过；本轮默认 pytest 中按配置跳过。
 - 真实跨实例 SSE 会话：历史验收已通过；本轮未重跑。
@@ -254,7 +255,7 @@ uv run python -m pytest tests/ -v
 - 阶段耗时观测与关系回答优化提交：`369d4eb`。
 - P5.1 检索 Agent 独立子图提交：`548702f`。
 - P5.1 合并到 `main/dev/功能分支`：`fec44e9`。
-- 全量 pytest：`309 passed, 5 skipped`。
+- 全量 pytest：`310 passed, 5 skipped`；前端 Vitest：`7 passed`。
 - 产品固定集：220/220 outcome 通过；未知实体误召回 0%，无依据与无来源披露 100%。
 - 真实 Redis 双实例和 Neo4j 本轮通过；API 跨实例多轮测试受外部模型 `MODEL_UNAVAILABLE` 阻塞，未通过。
 - 最新完整记录：[trustworthy-answer-v1.1-validation-2026-11-09.md](trustworthy-answer-v1.1-validation-2026-11-09.md)。
@@ -303,9 +304,9 @@ uv run python -m pytest tests/ -v
 
 当前优先级：
 
-1. 开发 Vue 证据问答和图谱探索页面，接入 V2 REST/SSE。
-2. 保持 `/api/v1`、GraphQAEngine、Cypher Guard 和证据审核不回归。
-3. 完成 V1.0 前端异常状态、手机布局和真实浏览器测试。
+1. 开发 Vue 图谱探索页，接入实体搜索、邻居和路径 Tool。
+2. 实现关系筛选、节点/证据联动和 50 节点上限。
+3. 保持 `/api/v1`、GraphQAEngine、Cypher Guard 和证据审核不回归。
 4. 完成 V1.0 Preview 首次公网部署、匿名配额和异常状态。
 5. V1.0 质量签收后，再实施对比、报告、Skill Registry 和本地 stdio MCP。
 6. 恢复外部模型服务后补跑 P5.1 和完整固定集。
@@ -414,6 +415,9 @@ be5dea4 docs: 清理过期文档并更新索引
 
 ### 14.3 当前验证状态
 
+- 2026-11-21 阶段 3 Python 全量 pytest：`310 passed, 5 skipped`。
+- 2026-11-21 阶段 3 前端 Vitest：`7 passed`；ESLint、vue-tsc 和 Vite build 通过。
+- 阶段 3 真实 Chromium 桌面、手机、多跳路径、新建会话和离线错误验收通过。
 - 2026-11-21 阶段 2 全量 pytest：`309 passed, 5 skipped`。
 - 2026-11-21 阶段 1 全量 pytest：`295 passed, 5 skipped`。
 - 2026-11-21 范围修订分支默认全量 pytest：`275 passed, 5 skipped`。
@@ -444,14 +448,15 @@ be5dea4 docs: 清理过期文档并更新索引
 
 ## 15. Vue 演示工作台 V1.0/V1.1 交接入口
 
-范围修订已确认，阶段 1、2 已完成：
+范围修订已确认，阶段 1～3 已完成：
 
 1. 应用服务、EntityId、Tool 契约、Registry 和 Executor 已完成。
 2. `resolve_entity`、`query_entity_facts`、`query_neighbors` 和 `find_evidence_paths` 已实现。
 3. API V2、匿名 Cookie、IP 限流、SSE、Tool 路由和 OpenAPI 已实现。
-4. 下一阶段实现 Vue 证据问答和图谱探索页面。
-5. 保持 V1 API 和现有 GraphQAEngine 可用。
-6. V1.0 核心页面完成后再安排首次部署，不等待 V1.1。
+4. Vue 证据问答已完成并通过真实浏览器测试。
+5. 下一阶段实现 Vue 图谱探索页面。
+6. 保持 V1 API 和现有 GraphQAEngine 可用。
+7. V1.0 核心页面完成后再安排首次部署，不等待 V1.1。
 
 实施入口文档：
 
@@ -462,5 +467,6 @@ be5dea4 docs: 清理过期文档并更新索引
 - [V1 版本范围与技术取舍](V1版本范围与技术取舍-2026-11-21.md)
 - [阶段 1 应用层与 Tool 实现记录](阶段1应用层与Tool实现记录-2026-11-21.md)
 - [阶段 2 API V2 实现记录](阶段2API-V2实现记录-2026-11-21.md)
+- [阶段 3 Vue 证据问答实现记录](阶段3Vue证据问答实现记录-2026-11-21.md)
 
 当前阶段 1 实现分支为 `codex/vue-phase1-app-tools`，不直接在 `main/dev` 上编码。
