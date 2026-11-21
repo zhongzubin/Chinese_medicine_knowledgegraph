@@ -2,11 +2,11 @@
 
 > 代码基线：`2eac508`
 >
-> 交接日期：2026-11-18
+> 交接日期：2026-11-21
 >
-> 当前分支：`main`
+> 当前分支：`codex/vue-refactor-design`
 
-本文用于新对话快速恢复上下文。开始开发前仍须完整阅读 `AGENTS.md`、`docs/graph_qa/README.md`、`architecture.md`、`contracts.md`、`security-and-evaluation.md` 和 `implementation-challenges.md`。
+本文用于新对话快速恢复上下文。开始开发前仍须完整阅读 `AGENTS.md`、`docs/graph_qa/README.md`、`architecture.md`、`contracts.md`、`security-and-evaluation.md`，以及 Vue 演示版的需求、架构、迁移和验收文档。
 
 ## 1. 项目目标
 
@@ -31,6 +31,7 @@
 | 质量验收与基础 CI | 基础 CI 已合入；分支已收敛；最新远程 CI 结果待确认；人工审核 0/50 |
 | Agent 基础层 | 已完成；角色注册、受控检索 Agent 闭环和证据审核 Agent 已接入 |
 | P5.1 检索 Agent 独立子图 | v1 已实现并合入三条分支；自动化和浏览器关键链路通过；外部模型相关回归待补 |
+| 演示工作台 V1 设计 | 需求、技术架构、迁移和验收文档已形成基线，待评审确认 |
 | M5 微调/部署增强 | 未开始 |
 
 明确不在当前范围：
@@ -259,6 +260,7 @@ uv run python -m pytest tests/ -v
 - 质量验收与基础 CI 记录：[质量验收与 CI 实施记录](质量验收与CI实施记录-2026-11-13.md)。
 - P5.1 方案：[检索 Agent 独立子图方案与验收](检索Agent独立子图方案与验收-2026-11-15.md)。
 - P5.1 验收记录：[检索 Agent 独立子图验收记录](检索Agent独立子图验收记录-2026-11-15.md)。
+- 下一阶段设计：[需求规格说明书](需求规格说明书-2026-11-21.md)、[技术与架构设计](技术与架构设计-2026-11-21.md)、[重构与迁移方案](重构与迁移方案-2026-11-21.md)、[项目验收方案](项目验收方案-2026-11-21.md)。
 - 真实 120 条 outcome：`119/120`；实体 Recall@3：97.78%；grounded 证据覆盖率：100%。
 - 多轮全量：20 组、62 轮，outcome 和实体匹配均为 100%。
 - Cypher 通过率：100%；查询执行成功率：100%；`acceptance.passed=true`。
@@ -297,11 +299,12 @@ uv run python -m pytest tests/ -v
 
 当前优先级：
 
-1. 恢复外部模型服务并补跑 P5.1 固定集与 API 跨实例回归。
-2. 独立领域审核者并行完成 50 条人工事实复核。
-3. 配置真实 Redis/API/Neo4j 集成的可重复运行环境。
-4. 保持动态多跳、semantic 边界、结构化回答审核、FastAPI、Streamlit、Redis、LangGraph、Neo4j、BGE + FAISS 和 Cypher Guard 不回归。
-5. 性能优化、内部试用、多用户认证、监控和多 worker 继续延后。
+1. 评审并冻结 Vue 演示版 V1 的需求、架构、迁移和验收文档。
+2. 按迁移方案实现应用层、Tool Registry 与 API V2。
+3. 开发 Vue 证据问答和图谱探索页面。
+4. 完成 Skill Registry 和本地 stdio MCP。
+5. 恢复外部模型服务后补跑 P5.1 和完整固定集。
+6. 独立领域审核者完成 50 条人工事实复核。
 
 ### 12.1 当前质量基线
 

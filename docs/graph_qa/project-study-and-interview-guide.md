@@ -1893,7 +1893,7 @@ compare_formula_compositions(formulas)
 按顺序阅读：
 
 1. `README.md`
-2. `docs/graph_qa/project-architecture.md`
+2. `docs/graph_qa/技术与架构设计-2026-11-21.md`
 3. `docs/graph_qa/architecture.md`
 4. `docs/graph_qa/contracts.md`
 5. 本文第 1 至 7 节
@@ -2098,11 +2098,11 @@ compare_formula_compositions(formulas)
 | 文档 | 用途 |
 | --- | --- |
 | [README](../../README.md) | 项目功能、运行命令和当前进度 |
-| [项目架构](project-architecture.md) | 当前架构图和 Agent 现状 |
+| [项目架构](技术与架构设计-2026-11-21.md) | Vue 工作台、Tool/Skill/MCP 与现有内核 |
 | [架构说明](architecture.md) | 模块职责、状态字段、工作流和安全决策 |
 | [数据与接口契约](contracts.md) | API、SSE、会话、计划、证据模型 |
 | [安全与评测规范](security-and-evaluation.md) | 威胁模型、指标、测试门禁 |
-| [实现难点](implementation-challenges.md) | 已遇到的问题、根因和修复过程 |
+| [重构迁移](重构与迁移方案-2026-11-21.md) | 渐进迁移、回滚和交付顺序 |
 | [交接说明](HANDOFF.md) | 阶段状态、文件地图、验证基线和限制 |
 
 ### 17.2 数据链路源码

@@ -1,11 +1,44 @@
 # 中医知识图谱问答开发基线
 
-> 文档状态：当前实现基线 v1.2
+> 文档状态：当前实现基线 V1.2 + 演示工作台 V1 设计基线
 >
-> 适用阶段：可验证问答内核、API、会话流式、Streamlit、查询扩展与 Agent 基础层
-> 最后更新：2026-11-01
+> 适用阶段：现有问答内核、Vue 演示重构、Tool/Skill 与本地 MCP
+>
+> 最后更新：2026-11-21
 
 本目录定义中医知识图谱问答当前实现的技术边界、接口契约、安全规则和验收标准，覆盖 CLI、FastAPI、SSE、Redis 会话、本地 FAISS 混合召回和 Streamlit。
+
+## 文档导航
+
+### 当前设计基线
+
+- [需求规格说明书](需求规格说明书-2026-11-21.md)
+- [技术与架构设计](技术与架构设计-2026-11-21.md)
+- [重构与迁移方案](重构与迁移方案-2026-11-21.md)
+- [项目验收方案](项目验收方案-2026-11-21.md)
+
+### 当前实现与运行
+
+- [交接说明](HANDOFF.md)
+- [当前实现架构](architecture.md)
+- [数据与接口契约](contracts.md)
+- [安全与评测规范](security-and-evaluation.md)
+- [产品路线图](product-quality-roadmap.md)
+- [本地演示运行](local-demo.md)
+- [项目理解与面试准备指南](project-study-and-interview-guide.md)
+
+### 历史验收记录
+
+历史文件按日期保留，用于追溯当时结果；当前行为和接口以“当前实现与运行”及新设计基线为准。
+
+- [动态多跳开发方案与验收](动态多跳开发方案与验收-2026-11-12.md)
+- [检索 Agent 独立子图方案与验收](检索Agent独立子图方案与验收-2026-11-15.md)
+- [检索 Agent 独立子图验收记录](检索Agent独立子图验收记录-2026-11-15.md)
+- [质量验收与基础 CI 实施记录](质量验收与CI实施记录-2026-11-13.md)
+- [语义召回边界验证记录](语义召回边界验证记录-2026-11-09.md)
+- [阶段耗时观测与优化记录](阶段耗时观测与优化记录-2026-11-11.md)
+- [可信回答 v1.1 验证记录](trustworthy-answer-v1.1-validation-2026-11-09.md)
+- [未知实体、无依据与产品集验证](quality-boundary-validation-2026-11-01.md)
 
 ## 项目目标
 
@@ -95,7 +128,7 @@ flowchart LR
     F2 -->|已命中| H
     G --> H
     H -->|未匹配| I[请求补充具体实体]
-    H -->|已匹配| J[受控查询规划：属性、聚合、多条件、两跳、关系或 Text2Cypher]
+    H -->|已匹配| J[受控查询规划：属性、聚合、多条件、2～3 步多跳、关系或 Text2Cypher]
     J --> K[结构与只读安全校验]
     K -->|不通过且可重试| J
     K -->|不通过且重试耗尽| L[安全失败]
@@ -107,9 +140,8 @@ flowchart LR
 [product-quality-roadmap.md](product-quality-roadmap.md)。
 
 完整架构见 [architecture.md](architecture.md)，数据与接口契约见 [contracts.md](contracts.md)，安全及评测规则见 [security-and-evaluation.md](security-and-evaluation.md)。
-当前实现总览图见 [project-architecture.md](project-architecture.md)。
-
-M1 实现中遇到的问题、修复过程和遗留限制记录在 [implementation-challenges.md](implementation-challenges.md)。
+目标架构图与 Vue 工作台设计见
+[技术与架构设计](技术与架构设计-2026-11-21.md)。
 
 ## 开发阶段
 

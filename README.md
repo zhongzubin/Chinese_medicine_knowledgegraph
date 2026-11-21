@@ -2,8 +2,8 @@
 
 一个面向中药与方剂知识的中文知识图谱项目，覆盖网页数据采集、实体关系抽取、Neo4j 图谱导入、可验证问答 API、流式输出和 Streamlit 交互界面。
 
-当前系统架构图见
-[docs/graph_qa/project-architecture.md](docs/graph_qa/project-architecture.md)。
+目标系统架构和 Vue 演示版技术方案见
+[技术与架构设计](docs/graph_qa/技术与架构设计-2026-11-21.md)。
 
 项目当前支持：
 
@@ -16,6 +16,15 @@
 - 使用本地 BGE-large + FAISS 补充别名和同义表达召回。
 - 提供 CLI、FastAPI SSE 接口和 Streamlit 双栏交互界面。
 - 使用 Redis 保存 5 轮会话，并提供 API Key、限流和全局并发控制。
+
+## 下一阶段设计
+
+- [需求规格说明书](docs/graph_qa/需求规格说明书-2026-11-21.md)
+- [技术与架构设计](docs/graph_qa/技术与架构设计-2026-11-21.md)
+- [重构与迁移方案](docs/graph_qa/重构与迁移方案-2026-11-21.md)
+- [项目验收方案](docs/graph_qa/项目验收方案-2026-11-21.md)
+
+下一版本采用 Vue 3 工作台、API V2、Tool/Skill Registry 和本地 stdio MCP，现有 Streamlit 在功能对齐前保留。
 
 ## 数据流程
 

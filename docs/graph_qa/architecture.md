@@ -5,7 +5,8 @@
 > 所属阶段：M1 问答内核、M2 API、M3 会话与流式、M4 Streamlit、查询扩展与 Agent 基础层
 > 最后更新：2026-11-01
 
-当前实现总览图见 [project-architecture.md](project-architecture.md)。
+Vue 工作台和 Tool/Skill/MCP 的目标架构见
+[技术与架构设计](技术与架构设计-2026-11-21.md)。
 
 ## 1. 架构目标
 
@@ -113,7 +114,7 @@ flowchart TB
 | `evidence` | 支持回答的实体、关系和来源 |
 | `facts` | 支持回答的属性事实 |
 | `aggregates` | 受控计数结果 |
-| `paths` | 受控两跳的逐跳路径证据 |
+| `paths` | 受控 2～3 步多跳的逐跳路径证据 |
 | `verification` | 本轮回答审核状态、覆盖计数和来源统计 |
 | `answer` | 最终回答 |
 | `warnings` | 检索范围、模型降级等用户可见提示 |
@@ -284,7 +285,7 @@ M1 使用 Python 标准库实现字符串相似度。当前 M3 扩展增加本�
 - 可引用的属性事实。
 - 可引用的受控聚合结果。
 - 可引用的多条件结果对象。
-- 可引用的两跳路径及其逐跳关系和来源。
+- 可引用的 2～3 步多跳路径及其逐跳关系和来源。
 
 回答遵循：
 
@@ -382,7 +383,7 @@ flowchart LR
 - “同时满足多个实体条件”的列表问题使用多个 `EXISTS` 固定模板，返回结果节点、命中关系和来源。
 - 多跳查询只允许 Schema 中存在、连续、唯一且无循环的 2～3 步路径；每一跳都必须通过校验，并返回完整 `PathEvidence`。
 - 查询规划优先使用经过测试的模板，Text2Cypher 只作为受限回退。
-- `RetrievalAgent` 使用独立 `RetrievalPlanningInput`/`RetrievalPlanningResult` 契约，输出最多一个现有计划对象；其执行顺序固定为两跳、属性、聚合、多条件列表、关系模板和 Schema 约束回退。
+- `RetrievalAgent` 使用独立 `RetrievalPlanningInput`/`RetrievalPlanningResult` 契约，输出最多一个现有计划对象；其执行顺序固定为 Schema 约束 2～3 步动态多跳、属性、聚合、多条件列表、关系模板和 Schema 约束回退。
 - 规划、校验、执行和观察已经收敛为独立 LangGraph 检索子图；父图只调用子图入口，SSE 仍公开原有四个内部阶段。
 - 查询计划类型通过 API `query.plan_kind` 和 SSE `plan_cypher.plan_kind` 公开，Streamlit 只展示安全中文策略名称，不展示模型推理或未校验 Cypher。
 - 最终回答生成后增加事实与引用校验。

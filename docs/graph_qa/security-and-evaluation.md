@@ -26,7 +26,7 @@
 
 - 使用 Neo4j read session 或 read transaction。
 - 数据库账号应只有读取权限，应用层校验不能替代数据库权限。
-- xxxxxxxxxx1 1docs/graph_qa/assets/project-architecture.pngtext
+- 所有查询必须配置事务超时，并只使用只读事务。
 - 返回记录数受 `GRAPH_QA_MAX_RESULTS` 限制。
 - 真实集成测试也不允许在目标图数据库执行写查询。
 
