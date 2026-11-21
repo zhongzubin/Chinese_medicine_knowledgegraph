@@ -13,6 +13,7 @@ from graph_qa.models import (
     MultiConditionQueryPlan,
     MultiHopQueryPlan,
     MultiHopStep,
+    NeighborQueryPlan,
     UsedEntityRef,
 )
 from graph_qa.neo4j_repository import (
@@ -64,6 +65,7 @@ def make_schema() -> GraphSchema:
                 {"type": "HAS_INGREDIENT"},
                 {"type": "TREATS_DISEASE"},
                 {"type": "HAS_SYMPTOM"},
+                {"type": "FROM_SOURCE"},
             ],
             "triple_patterns": [
                 {
@@ -85,6 +87,16 @@ def make_schema() -> GraphSchema:
                     "subject_label": "Disease",
                     "relationship_type": "HAS_SYMPTOM",
                     "object_label": "Symptom",
+                },
+                {
+                    "subject_label": "Herb",
+                    "relationship_type": "FROM_SOURCE",
+                    "object_label": "Source",
+                },
+                {
+                    "subject_label": "Formula",
+                    "relationship_type": "FROM_SOURCE",
+                    "object_label": "Source",
                 },
             ],
         }
@@ -245,6 +257,112 @@ def test_repository_rejects_write_query_before_opening_transaction():
         repository.execute_read(plan)
 
     assert session.begin_calls == []
+
+
+def test_execute_neighbors_uses_controlled_query_and_deduplicates_sources():
+    rows = [
+        {
+            "subject": "麻黄",
+            "subject_label": "Herb",
+            "relationship": "HAS_EFFECT",
+            "object": "发汗",
+            "object_label": "Effect",
+            "sources": ["《本草》"],
+        },
+        {
+            "subject": "麻黄",
+            "subject_label": "Herb",
+            "relationship": "HAS_EFFECT",
+            "object": "发汗",
+            "object_label": "Effect",
+            "sources": ["《本经》", "《本草》"],
+        },
+        {
+            "subject": "无关实体",
+            "subject_label": "Herb",
+            "relationship": "HAS_EFFECT",
+            "object": "发汗",
+            "object_label": "Effect",
+            "sources": [],
+        },
+    ]
+    session = FakeSession(query_rows=rows)
+    repository, _driver = make_repository(session)
+    plan = NeighborQueryPlan(
+        entity=UsedEntityRef(label="Herb", name="麻黄"),
+        direction="outgoing",
+        relationship_types=["HAS_EFFECT"],
+        limit=10,
+    )
+
+    result = repository.execute_neighbors(plan)
+
+    assert result.rows == [
+        {
+            "subject": "麻黄",
+            "subject_label": "Herb",
+            "relationship": "HAS_EFFECT",
+            "object": "发汗",
+            "object_label": "Effect",
+            "source": "《本草》；《本经》",
+        }
+    ]
+    query, parameters = session.transaction.queries[0]
+    assert "MATCH (subject)-[relationship]->(object)" in query
+    assert "any(pattern IN $patterns" in query
+    assert "OPTIONAL MATCH" in query
+    assert parameters["direction"] == "outgoing"
+    assert parameters["entity_label"] == "Herb"
+    assert parameters["entity_name"] == "麻黄"
+    assert parameters["patterns"] == [
+        {
+            "subject_label": "Herb",
+            "relationship": "HAS_EFFECT",
+            "object_label": "Effect",
+        }
+    ]
+    assert session.transaction.committed is True
+
+
+def test_execute_neighbors_rejects_unknown_relationship_before_query():
+    session = FakeSession(query_rows=[])
+    repository, _driver = make_repository(session)
+    plan = NeighborQueryPlan(
+        entity=UsedEntityRef(label="Herb", name="麻黄"),
+        relationship_types=["UNKNOWN_REL"],
+    )
+
+    with pytest.raises(RepositoryError, match="未允许的关系类型"):
+        repository.execute_neighbors(plan)
+
+    assert session.begin_calls == []
+
+
+def test_execute_neighbors_supports_incoming_direction():
+    rows = [
+        {
+            "subject": "四君子汤",
+            "subject_label": "Formula",
+            "relationship": "HAS_INGREDIENT",
+            "object": "人参",
+            "object_label": "Herb",
+            "sources": [],
+        }
+    ]
+    session = FakeSession(query_rows=rows)
+    repository, _driver = make_repository(session)
+    plan = NeighborQueryPlan(
+        entity=UsedEntityRef(label="Herb", name="人参"),
+        direction="incoming",
+        relationship_types=["HAS_INGREDIENT"],
+    )
+
+    result = repository.execute_neighbors(plan)
+
+    assert result.rows[0]["subject"] == "四君子汤"
+    assert result.rows[0]["object"] == "人参"
+    _query, parameters = session.transaction.queries[0]
+    assert parameters["direction"] == "incoming"
 
 
 def test_execute_attributes_uses_controlled_query_and_filters_fields():

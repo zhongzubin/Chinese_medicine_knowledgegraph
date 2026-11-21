@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 EntityLabel = Literal["Herb", "Formula", "Disease", "Symptom", "Effect", "Source"]  # 实体标签
 MatchType = Literal["name", "alias", "fuzzy", "semantic"]  # 匹配类型
 AggregateDirection = Literal["outgoing", "incoming"]  # 聚合方向
+NeighborDirection = Literal["outgoing", "incoming", "both"]  # 邻居查询方向
 RetrievalPlanKind = Literal[
     "controlled_multi_hop", # 控制的多跳查询
     "controlled_attribute",  # 控制的属性查询
@@ -138,6 +139,25 @@ class AggregateQueryPlan(StrictModel):
     direction: AggregateDirection
     require_all_entities: bool = False
     description: str = Field(min_length=1, max_length=160)
+
+
+class NeighborQueryPlan(StrictModel):
+    entity: UsedEntityRef
+    direction: NeighborDirection = "both"
+    relationship_types: List[str] = Field(default_factory=list)
+    limit: int = Field(default=20, ge=1, le=50)
+
+    @field_validator("relationship_types")
+    @classmethod
+    def normalize_relationship_types(cls, values: List[str]) -> List[str]:
+        normalized = []
+        for value in values:
+            value = value.strip()
+            if not value:
+                raise ValueError("关系类型不能为空")
+            if value not in normalized:
+                normalized.append(value)
+        return normalized
 
 
 class MultiConditionQueryPlan(StrictModel):

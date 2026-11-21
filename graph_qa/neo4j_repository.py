@@ -16,6 +16,7 @@ from graph_qa.models import (
     ErrorCode,
     MultiConditionQueryPlan,
     MultiHopQueryPlan,
+    NeighborQueryPlan,
     QueryResult,
 )
 from graph_qa.schema import GraphSchema, SUPPORTED_ENTITY_LABELS
@@ -46,6 +47,56 @@ MATCH (subject:{subject_label})-[relationship:{relationship}]->(object:{object_l
 WHERE {anchor}.name IN $entity_names
 RETURN count(DISTINCT {result}) AS count
 LIMIT 1
+""".strip()
+
+
+def neighbor_query(limit: int, include_source: bool) -> str:
+    source_match = (
+        "\nOPTIONAL MATCH (subject)-[:FROM_SOURCE]->(source_node:Source)"
+        "\nWHERE labels(subject)[0] IN $source_labels"
+        if include_source
+        else ""
+    )
+    with_clause = (
+        "WITH subject, relationship, object, "
+        "collect(DISTINCT source_node.name) AS source_names"
+        if include_source
+        else "WITH subject, relationship, object"
+    )
+    source_return = (
+        "[name IN source_names WHERE name IS NOT NULL] AS sources"
+        if include_source
+        else "[] AS sources"
+    )
+    return f"""
+MATCH (subject)-[relationship]->(object)
+WHERE (
+        (
+            ($direction = 'outgoing' OR $direction = 'both')
+            AND labels(subject)[0] = $entity_label
+            AND subject.name = $entity_name
+        )
+        OR (
+            ($direction = 'incoming' OR $direction = 'both')
+            AND labels(object)[0] = $entity_label
+            AND object.name = $entity_name
+        )
+    )
+AND any(pattern IN $patterns WHERE
+        labels(subject)[0] = pattern.subject_label
+        AND type(relationship) = pattern.relationship
+        AND labels(object)[0] = pattern.object_label
+    )
+{source_match}
+{with_clause}
+RETURN subject.name AS subject,
+       labels(subject)[0] AS subject_label,
+       type(relationship) AS relationship,
+       object.name AS object,
+       labels(object)[0] AS object_label,
+       {source_return}
+ORDER BY subject_label, subject, relationship, object_label, object
+LIMIT {limit}
 """.strip()
 
 
@@ -220,6 +271,195 @@ class Neo4jRepository:
             row_count=len(rows),
             elapsed_ms=int((time.perf_counter() - started_at) * 1000),
             limit_applied=validated.limit,
+        )
+
+    def execute_neighbors(
+        self,
+        plan: NeighborQueryPlan,
+    ) -> QueryResult:
+        """执行受控一跳邻居查询，不接受调用方提供的 Cypher。"""
+        try:
+            self.schema.assert_label(plan.entity.label)
+        except Exception as exc:
+            raise RepositoryError(
+                ErrorCode.CYPHER_REJECTED,
+                "邻居查询包含未知实体标签",
+            ) from exc
+        requested_relationships = set(plan.relationship_types)
+        invalid_relationships = (
+            requested_relationships - self.schema.relationship_types
+        )
+        if invalid_relationships:
+            raise RepositoryError(
+                ErrorCode.CYPHER_REJECTED,
+                "邻居查询包含未允许的关系类型",
+            )
+
+        entity_key = (plan.entity.label, plan.entity.name)
+        patterns = []
+        for subject_label, relationship, object_label in sorted(
+            self.schema.triple_patterns
+        ):
+            if (
+                requested_relationships
+                and relationship not in requested_relationships
+            ):
+                continue
+            is_outgoing = subject_label == plan.entity.label
+            is_incoming = object_label == plan.entity.label
+            if plan.direction == "outgoing" and not is_outgoing:
+                continue
+            if plan.direction == "incoming" and not is_incoming:
+                continue
+            if not (is_outgoing or is_incoming):
+                continue
+            patterns.append(
+                {
+                    "subject_label": subject_label,
+                    "relationship": relationship,
+                    "object_label": object_label,
+                }
+            )
+
+        limit = min(plan.limit, self.max_results)
+        source_labels = sorted(
+            subject_label
+            for subject_label, relationship, object_label
+            in self.schema.triple_patterns
+            if relationship == "FROM_SOURCE" and object_label == "Source"
+        )
+        include_source = bool(source_labels)
+        query = neighbor_query(limit, include_source)
+        parameters = {
+            "direction": plan.direction,
+            "entity_label": plan.entity.label,
+            "entity_name": plan.entity.name,
+            "patterns": patterns,
+        }
+        if include_source:
+            parameters["source_labels"] = source_labels
+        started_at = time.perf_counter()
+        try:
+            raw_rows = self._run_transaction(
+                query,
+                parameters,
+                fetch_limit=limit,
+            )
+        except Exception as exc:
+            text = str(exc).lower()
+            code = (
+                ErrorCode.QUERY_TIMEOUT
+                if "timeout" in text or "timed out" in text
+                else ErrorCode.QUERY_EXECUTION_FAILED
+            )
+            message = (
+                "图谱查询超时"
+                if code == ErrorCode.QUERY_TIMEOUT
+                else "图谱查询执行失败"
+            )
+            raise RepositoryError(code, message) from exc
+
+        pattern_keys = {
+            (
+                pattern["subject_label"],
+                pattern["relationship"],
+                pattern["object_label"],
+            )
+            for pattern in patterns
+        }
+        rows_by_key: Dict[
+            tuple[str, str, str, str, str],
+            Dict[str, Any],
+        ] = {}
+        for row in raw_rows:
+            subject = row.get("subject")
+            subject_label = row.get("subject_label")
+            relationship = row.get("relationship")
+            object_name = row.get("object")
+            object_label = row.get("object_label")
+            if not all(
+                isinstance(value, str) and value.strip()
+                for value in (
+                    subject,
+                    subject_label,
+                    relationship,
+                    object_name,
+                    object_label,
+                )
+            ):
+                continue
+            if (
+                subject_label not in self.schema.labels
+                or object_label not in self.schema.labels
+                or relationship not in self.schema.relationship_types
+                or (
+                    subject_label,
+                    relationship,
+                    object_label,
+                )
+                not in pattern_keys
+            ):
+                continue
+            is_outgoing = (
+                (subject_label, subject) == entity_key
+            )
+            is_incoming = (
+                (object_label, object_name) == entity_key
+            )
+            if plan.direction == "outgoing" and not is_outgoing:
+                continue
+            if plan.direction == "incoming" and not is_incoming:
+                continue
+            if not (is_outgoing or is_incoming):
+                continue
+
+            sources = row.get("sources")
+            source_names = [
+                source.strip()
+                for source in (
+                    sources if isinstance(sources, list) else []
+                )
+                if isinstance(source, str) and source.strip()
+            ]
+            key = (
+                subject.strip(),
+                subject_label,
+                relationship,
+                object_name.strip(),
+                object_label,
+            )
+            existing = rows_by_key.get(key)
+            if existing is None:
+                existing = {
+                    "subject": subject.strip(),
+                    "subject_label": subject_label,
+                    "relationship": relationship,
+                    "object": object_name.strip(),
+                    "object_label": object_label,
+                    "sources": [],
+                }
+                rows_by_key[key] = existing
+            existing_sources = existing["sources"]
+            for source_name in source_names:
+                if source_name not in existing_sources:
+                    existing_sources.append(source_name)
+
+        rows = [
+            {
+                **row,
+                "source": "；".join(row["sources"]) or None,
+            }
+            for row in rows_by_key.values()
+        ]
+        for row in rows:
+            row.pop("sources", None)
+        return QueryResult(
+            cypher=query,
+            parameters=parameters,
+            rows=rows,
+            row_count=len(rows),
+            elapsed_ms=int((time.perf_counter() - started_at) * 1000),
+            limit_applied=limit,
         )
 
     def execute_attributes(
